@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -9,21 +9,31 @@ function fixture(t, gitStatus = ' M package.json\n', supportsStage = true) {
   const root = mkdtempSync(join(tmpdir(), 'meigen-release-test-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   mkdirSync(join(root, 'scripts'))
-  mkdirSync(join(root, 'bin'))
   copyFileSync(new URL('../release.mjs', import.meta.url), join(root, 'scripts/release.mjs'))
   writeFileSync(join(root, '.env.local'), 'RELEASE_PRIVATE_FILE_LOADED=yes\n')
   const log = join(root, 'commands.jsonl')
-  for (const command of ['git', 'pnpm', 'npm']) {
-    const code = command === 'git'
-      ? `process.stdout.write(${JSON.stringify(gitStatus)});`
-      : `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command: ${JSON.stringify(command)}, args: process.argv.slice(2), privateFileLoaded: process.env.RELEASE_PRIVATE_FILE_LOADED }) + '\\n');\nif (process.argv[2] === 'stage' && process.argv[3] === '--help') process.stdout.write(${JSON.stringify(supportsStage ? 'npm stage publish' : 'unknown command')});`
-    const path = join(root, 'bin', command)
-    writeFileSync(path, `#!${process.execPath}\n${code}\n`)
-    chmodSync(path, 0o755)
+  // Mock the child-process boundary inside a real Node process. POSIX executable
+  // shebang fixtures cannot be spawned by native Node on Windows.
+  const preload = join(root, 'mock-commands.cjs')
+  writeFileSync(preload, `
+const cp = require('node:child_process');
+const { syncBuiltinESMExports } = require('node:module');
+cp.spawnSync = (command, args, options = {}) => {
+  if (command === 'git') {
+    if (JSON.stringify(args) !== JSON.stringify(['status', '--porcelain'])) throw new Error('Unexpected Git command');
+    return { status: 0, stdout: ${JSON.stringify(gitStatus)}, stderr: '' };
   }
-  const run = mode => spawnSync(process.execPath, [join(root, 'scripts/release.mjs'), mode], {
+  if (!['npm', 'pnpm'].includes(command)) throw new Error('Unexpected subprocess: ' + command);
+  const env = options.env ?? process.env;
+  require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command, args, privateFileLoaded: env.RELEASE_PRIVATE_FILE_LOADED }) + '\\n');
+  const stdout = args[0] === 'stage' && args[1] === '--help' ? ${JSON.stringify(supportsStage ? 'npm stage publish' : 'unknown command')} : '';
+  return { status: 0, stdout, stderr: '' };
+};
+syncBuiltinESMExports();
+`)
+  const run = mode => spawnSync(process.execPath, ['--require', preload, join(root, 'scripts/release.mjs'), mode], {
     cwd: root,
-    env: { PATH: join(root, 'bin'), NPM_TOKEN: 'npm_fixture_not_a_real_credential' },
+    env: { NPM_TOKEN: 'npm_fixture_not_a_real_credential' },
     encoding: 'utf8',
   })
   const calls = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
@@ -62,4 +72,6 @@ test('authorized staging command uses staged publication without auto-approval',
   assert.equal(f.run('stage').status, 0)
   assert.deepEqual(f.calls().map(call => call.args.slice(0, 2)), [['stage', '--help'], ['stage', 'publish']])
   assert.ok(f.calls().every(call => call.command === 'npm'))
+  assert.equal(f.calls()[0].privateFileLoaded, undefined)
+  assert.equal(f.calls()[1].privateFileLoaded, 'yes')
 })
