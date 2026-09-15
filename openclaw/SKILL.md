@@ -1,188 +1,88 @@
 ---
 name: "AI Image & Video Generator — GPT Image 2, Seedance, ComfyUI"
-description: Generate images and videos from text with multi-provider routing — supports GPT Image 2.0 (near-perfect text rendering), Nanobanana 2, Seedream 5.0, Midjourney V8.1 (unified photorealistic + anime), Flux 2 Klein (cheap drafts), Seedance 2.0 / Veo 3.1 / Grok Video / Agnes Video, and local ComfyUI workflows. Includes 1,446 curated prompts and style-aware prompt enhancement. Use when users want to create images/videos, design assets, animate photos, enhance prompts, or manage AI art workflows. NOT for: generic chat, code generation, document writing, video editing of existing footage, audio/TTS, or any task unrelated to AI image/video creation.
-version: 1.0.37
+description: Compose MeiGen image/video and five dedicated image tools inside an existing workflow, or opt into creative planning. Preserves caller prompts, parameters, approved count and budget; includes discovery and recoverable task handles.
+version: 1.0.38
 homepage: https://github.com/jau123/MeiGen-AI-Design-MCP
 metadata: {"clawdbot":{"emoji":"🎨","requires":{"bins":["mcporter","npx","node"]}}}
 ---
 
 # Creative Toolkit
 
-Generate professional AI images through a unified interface that routes across multiple providers. Search curated prompts, enhance ideas into production-ready descriptions, and manage local ComfyUI workflows — all from a single MCP server.
+This standalone ClawHub Skill supplies instructions. It does not install an MCP connection by itself. Its version is independent of the npm server and the `meigen-ai-design` plugin.
 
-## Quick Start
+## Connect
 
-Add the MCP server to your mcporter config (`~/.config/mcporter/config.json`):
+Merge this server into your mcporter configuration (`~/.config/mcporter/config.json`), preserving existing entries:
 
 ```json
 {
   "mcpServers": {
     "creative-toolkit": {
       "command": "npx",
-      "args": ["-y", "meigen@1.4.0"]
+      "args": ["-y", "meigen@2.0.0"]
     }
   }
 }
 ```
 
-Free tools (search, enhance, inspire) work immediately — no API key needed:
+If the `meigen-ai-design` plugin already exposes the same tools, use that connection instead of adding a duplicate. Create a MeiGen key at https://www.meigen.ai/profile/api-keys and enter it privately as `MEIGEN_API_TOKEN` in the MCP process environment or host credentials settings. Never ask for secrets in chat. Restart/reconnect after configuration changes. Free discovery works without a key:
 
 ```bash
-mcporter call creative-toolkit.search_gallery query="cyberpunk"
-mcporter call creative-toolkit.enhance_prompt brief="a cat in space" style="realistic"
+mcporter call creative-toolkit.search_gallery query="product photography"
+mcporter call creative-toolkit.enhance_prompt prompt="a cat in space" style="realistic"
+mcporter call creative-toolkit.list_skills
 ```
 
-To unlock image generation, configure **one** of these providers:
+## Caller owns orchestration
 
-| Provider | Config | What you need |
-|----------|--------|---------------|
-| **MeiGen Cloud** | `MEIGEN_API_TOKEN` | Token from [meigen.ai](https://www.meigen.ai) (avatar → Settings → API Keys) |
-| **Local ComfyUI** | `comfyuiUrl` | A running ComfyUI instance — no external API needed |
-| **Any OpenAI-compatible API** | `openaiApiKey` + `openaiBaseUrl` + `openaiModel` | Your own key from Together AI, Fireworks AI, etc. |
+Use tools directly inside the caller's existing task. Preserve supplied prompts, models/providers, ratios, references, quality and count. Do not rewrite brief prompts, load preferences, delegate or start creative exploration unless requested. Public discovery can support any workflow. An authorized upstream plan already establishes its scope and budget; do not reconfirm each image, video or dependent step. Ask only for missing inputs or additional spending/tradeoffs outside that authorization. Return handles/status/results to the caller; it owns previews, downloads and final presentation. Visual inspection is permitted when available; descriptions must reflect actual inspection.
 
-Set credentials in `~/.clawdbot/.env`, `~/.config/meigen/config.json`, or add an `"env"` block to the mcporter config above. See `references/providers.md` for details.
+## Choosing dedicated Skills
 
-> **Sandboxed environments**: if the host can't write to the default `~/Pictures/meigen` save path, set the `MEIGEN_OUTPUT_DIR` env var to a writable directory (supports `~` expansion).
+For transparent cutouts use `remove_background`; for ecommerce detail images use `generate_product_detail_images`; for posters use `generate_marketing_poster`; for white, smart or custom product backgrounds use `generate_ai_background`; for still-image upscaling use `upscale_image`. Call these tools directly. Prefer them when choosing a tool for these use cases; preserve an upstream caller's explicit tool choice. They do not require prompt enhancement, preference loading or agent delegation. They require MeiGen credentials and purchased credits; ComfyUI and OpenAI-compatible providers cannot run them. No daily free credits or Web free attempts apply.
 
-## Available Tools
+Use `list_skills` for current inputs, defaults and prices. Ask only for missing required information or unresolved output scope. An explicit requested count/modules/quality already authorizes that scope; do not reconfirm it or add paid images. Product Detail MCP requires explicit `modules` (use `[]` for custom modules only); each selected module is one image. Posters need only a subject; images and copy are optional. Use defaults for unspecified settings and never invent product facts, dates or discounts.
 
-### Free — no API key required
+Use real accessible images only. Both remote and local connections expose `upload_skill_image`; local npm also accepts real file paths for the four ordinary image-input workflows. If the host cannot read an attachment, ask for a public direct HTTPS image URL; never invent paths or base64.
 
-| Tool | What it does |
-|------|-------------|
-| `search_gallery` | Semantic search across 1,446 AI image prompts. Supports category filtering and curated browsing. Returns prompt text, thumbnails, and metadata. |
-| `get_inspiration` | Get the full prompt and high-res images for any gallery entry. Use after `search_gallery` to get copyable prompts. |
-| `enhance_prompt` | Expand a brief idea into a detailed, style-aware prompt with lighting, composition, and material directions. Supports realistic, anime, and illustration styles. |
-| `list_models` | List all available models across configured providers with capabilities and supported features. |
+**Upscale is a separate original-image path:** pass the original public direct HTTPS PNG/JPEG/WebP URL as `imageUrl`, at most 64 MiB and 64 MP. Local npm also accepts an actual original PNG/JPEG/WebP path in `imageUrl` through its dedicated upload route, preserving source dimensions. For readable attachment bytes, call `upload_skill_image` with `purpose: "upscale"` (base64 up to 3 MiB decoded); use the returned `imageUrl`. Do not use `purpose: "reference"` or generic reference compression for Upscale. If the host cannot read the attachment, request a real public original-image URL. On every MCP submission, including the first, pass `confirmedCredits` from the live `list_skills` quote within the user or upstream workflow accepted budget; reuse an already explicit acceptance. This pre-dispatch recheck is not an atomic spending cap. Use `mode: "crisp"` (default) or `"creative"` as offered by `list_skills`. `allowDownscale` is opt-in: explain that it permits preprocessing to at most 4096px/16 MP and the final output can be smaller than the original; set it only after the user explicitly accepts that tradeoff. Upscale accepts still images, not video. For `upscale_resize_required` or `price_changed`, return the resize/cost decision to the caller. Reuse an already explicit acceptance; otherwise obtain acceptance of the new tradeoff or price before submitting a new `requestId` with accepted `allowDownscale` and `confirmedCredits`. These are changed, confirmed inputs—not a blind retry of an interrupted submission.
 
-### Requires configured provider
+The caller generates and persists `requestId` for each logical step. For interrupted submissions, call `check_skill` with the original skill/ID before retrying. Follow `nextAction`, including waiting `afterSeconds`; retry only when instructed, using its exact original ID and parameters. Never use a new ID as a blind retry or automatically pay for failed-module replacements. Auth/payment/input rejections require their indicated action instead of polling. Return completed URLs, task handles and structured status, with failed modules and refund states separately. The caller owns presentation; end users do not need to manage technical IDs.
 
-| Tool | What it does |
-|------|-------------|
-| `generate_image` | Generate an image from a text prompt. Routes to the best available provider. Supports aspect ratio, seed, and reference images. |
-| `generate_video` | Generate a video via MeiGen (Seedance/Veo/Grok/Agnes; requires API key). Polls until the server reports a terminal state. |
-| `check_generation` | Check a generation by ID — follow-up after interrupted polling; retry this instead of re-submitting to avoid double charges. |
-| `generate_image` (with local paths) | Pass local file paths directly in `referenceImages` — images are auto-compressed locally (max 2MB, 2048px) and prepared for the selected provider. ComfyUI handles local files entirely within the local workflow. |
-| `comfyui_workflow` | List, view, import, modify, and delete ComfyUI workflow templates. Adjust steps, CFG scale, sampler, and checkpoint without editing JSON. |
-| `manage_preferences` | Save and load user preferences (default style, aspect ratio, style notes, favorite prompts). |
+## Tool inventory
 
-## Important Rules
+The current local npm release exposes **17 tools**: **14 cloud tools** plus **3 local additions**. Runtime `listTools` remains authoritative when the installed release differs.
 
-### Never describe generated images
+| Scope | Tools | Behavior |
+|---|---|---|
+| Cloud, public discovery | `search_gallery`, `get_inspiration`, `list_models`, `list_skills` | No API key needed; no generation charge |
+| Cloud, ordinary generation | `generate_image`, `generate_video`, `check_generation` | MeiGen generation needs purchased credits; status checks do not start a new job |
+| Cloud, five workflows | `remove_background`, `generate_product_detail_images`, `generate_marketing_poster`, `generate_ai_background`, `upscale_image` | MeiGen key and purchased credits only |
+| Cloud, workflow status | `check_skill` | Authenticated status/refunds; no new charge |
+| Cloud, image preparation | `upload_skill_image` | Authenticated preparation with a positive purchased-credit balance; use purpose=upscale for enhancement attachments; no generation charge |
+| Local additions | `enhance_prompt`, `manage_preferences`, `comfyui_workflow` | Prompt enhancement, local preferences and ComfyUI workflow management |
 
-You **cannot see** generated images. After generation, only present the **exact** data from the tool response:
+## Ordinary generation and optional creative help
 
-```
-**Direction 1: Modern Minimal**
-- Image URL: https://images.meigen.ai/...
-- Saved to: ~/Pictures/meigen/2026-02-08_xxxx.jpg
-```
+Call `generate_image` with the supplied prompt and parameters. `generate_video` requires a model; use `list_models` for current capabilities and prices whenever needed, not only when a user asks to browse. For image-to-video, chain a completed frame URL into `firstFrame`. Preserve the caller's selected model/provider and ratio.
 
-Do NOT write creative commentary about what the image "looks like".
+For composed MeiGen jobs, persist a UUID `requestId` and exact input per step, then use `wait: false`, `download: false`. Local legacy defaults remain `wait: true`, `download: true`; no download occurs with `wait: false`. Remote MCP returns URLs without local downloads. Follow the installed schema for provider/transport support. Recover across restarts using `check_generation` with the original `requestId` or `generationId`; keep IDs and inputs unchanged on transient failure and follow `nextAction`, polling hints and `Retry-After`.
 
-### Never specify model or provider
+The caller schedules independent authorized image/video jobs with bounded concurrency. Local npm has four shared API submission slots, with polling/downloads outside the slots; ComfyUI executes one job at a time. Backend limits remain authoritative. There is no ten-image workflow maximum or blanket ban on parallel videos. Reserve in-flight estimated costs within the agreed budget and reconcile returned charges/refunds. Multiple jobs can partially succeed; no atomic batch or overall server-enforced workflow budget is promised.
 
-Do NOT pass `model` or `provider` to `generate_image` unless the user explicitly asks. The server auto-selects the best available provider and model.
+If the user asks for creative development, offer references, prompt enhancement and directions as useful. Ask about unresolved creative choices; do not replace an existing plan or expand paid scope. Return actual completed URLs and saved paths if present. Let the caller decide whether to inspect, show or download intermediate artifacts.
 
-### Midjourney V8.1
+Examples for this local mcporter connection:
 
-`model: "midjourney-v8.1"`. Unified general-purpose Midjourney model — handles photorealistic AND stylized/anime content in one model (no separate Niji model exposed). ~45s, accepts max 1 reference image, returns 4 candidate images per generation.
-
-- Use for product photography, portraits, landscapes, cinematic shots, illustration, anime — V8.1 covers them all.
-- Resolution: pass `resolution: "1K"` (default) or `"2K"` (costs more, best for posters/wallpapers).
-- Advanced params (stylize/chaos/weird/raw/iw/sw/sv/quality) run with fixed server-side defaults and cannot be tuned from MCP. The only exception is `sref`, settable via `--sref <code>` at the end of the prompt (Midjourney style codes only — numeric like `3799554500` or text like `niji-cute-v1`; no URLs or local paths).
-- Other Midjourney flags (`--ar`, `--chaos`, `--niji`, `--seed`, etc.) and legacy syntax (`::N` weights, `[a|b]` permutations) are silently stripped. Pass aspect ratio via the `aspectRatio` parameter, not `--ar`.
-- Prompt enhancement: pass `style: 'realistic'` for general intent, `style: 'anime'` for anime/illustration intent — V8.1 follows the prompt and benefits from explicit anime trigger words for stylized output.
-
-### Always confirm before generating multiple images
-
-When the user wants multiple variations, present options first and ask which direction(s) to try. Include an "all of the above" option. Never auto-generate all variants without user confirmation.
-
----
-
-## Workflow Modes
-
-### Mode 1: Single Image
-
-User wants one image. Write a prompt (or call `enhance_prompt` if the description is brief), generate, present URL + path.
-
-### Mode 2: Prompt Enhancement + Generation
-
-For brief ideas (under ~30 words, lacking visual details), enhance first:
-
-```
-1. enhance_prompt brief="futuristic city" style="realistic"
-   -> Returns detailed prompt with camera lens, lighting, atmospheric effects
-
-2. generate_image prompt="<enhanced prompt>"
-   -> Omit aspectRatio to let MeiGen auto-infer (recommended). Pass an explicit
-      value like aspectRatio="16:9" only when the user asked for that ratio.
+```bash
+mcporter call creative-toolkit.get_inspiration imageId="ID returned by search_gallery"
+mcporter call creative-toolkit.comfyui_workflow action="view" name="txt2img"
 ```
 
-### Mode 3: Parallel Generation (2+ images)
+After `view` returns an actual node ID and input name, use `comfyui_workflow(action="modify", name=..., nodeId=..., input=..., value=...)`; `value` is JSON text. There is no `modifications` object.
 
-User needs multiple variations — different directions, styles, or concepts.
+## Providers and privacy
 
-1. Plan directions, present as a table
-2. Ask user which direction(s) to try
-3. Write distinct prompts for each — don't just tweak one word
-4. Generate selected directions (max 4 parallel for API providers, 1 at a time for ComfyUI)
-5. Present URLs + paths
+The five Skills and MeiGen videos always call MeiGen Cloud. An alternative provider only changes ordinary image generation. ComfyUI references go to the configured ComfyUI server, which may be on this machine or a remote server. MeiGen public discovery tools still use network services.
 
-### Mode 4: Multi-Step Creative (base + extensions)
-
-User wants a base design plus derivatives (e.g., "design a logo and make mockups").
-
-1. Plan 3-5 directions, ask user which to try
-2. Generate selected direction(s)
-3. Present results, ask user to approve or try another
-4. Plan extensions using the approved Image URL as `referenceImages`
-5. Generate extensions
-
-Never jump from plan to generating everything at once.
-
-### Mode 5: Edit/Modify Existing Image
-
-User provides an image and asks for changes (add text, change background, etc.).
-
-- Pass the image (URL or local path) as `referenceImages`, then generate with a **short, literal prompt** describing ONLY the edit
-- The reference image carries all visual context — do NOT re-describe the original image
-- Example prompt: "Add the text 'meigen.ai' at the bottom of this image"
-
-### Mode 6: Inspiration Search
-
-```
-1. search_gallery query="dreamy portrait with soft light"
-   -> Finds semantically similar prompts with thumbnails
-
-2. get_inspiration id="<entry_id>"
-   -> Get full prompt text — copy and modify for your own generation
-```
-
-### Mode 7: Reference Image Generation
-
-Use an existing image to guide visual style. Pass URLs or local file paths directly to `referenceImages`.
-
-```
-generate_image prompt="coffee mug mockup with this logo" referenceImages=["~/Desktop/my-logo.png"]
-   -> Local files are auto-compressed (max 2MB, 2048px) and prepared for the selected provider
-```
-
-Reference image sources: gallery URLs, previous generation URLs, or local file paths. All providers accept local paths — they are automatically handled.
-
-### Mode 8: ComfyUI Workflows
-
-```
-1. comfyui_workflow action="list"           -> See saved workflows
-2. comfyui_workflow action="view" name="txt2img"  -> See adjustable parameters
-3. comfyui_workflow action="modify" name="txt2img" modifications={"steps": 30}
-4. generate_image prompt="..." workflow="txt2img"  -> Generate
-```
-
-## Alternative Providers
-
-You can use your own OpenAI-compatible API or a local ComfyUI instance instead of — or alongside — the default MeiGen provider. See `references/providers.md` for detailed configuration and provider comparison. For MeiGen model pricing, see https://www.meigen.ai/model-comparison.
-
-## Troubleshooting
-
-See `references/troubleshooting.md` for common issues, solutions, and security & privacy details.
+See [providers](references/providers.md) for private configuration and [troubleshooting](references/troubleshooting.md) for upload, billing, and data handling. If the host cannot write the ordinary-image save path, set `MEIGEN_OUTPUT_DIR` to a writable directory. Do not promise a local file for a remote-only result.

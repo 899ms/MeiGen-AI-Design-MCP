@@ -1,362 +1,45 @@
 ---
 description: >-
-  Interactive provider configuration wizard. Use when the user runs
-  /meigen:setup, says "configure meigen", "set up image generation",
-  "add API key", or otherwise needs help wiring up an image generation
-  provider (MeiGen platform, ComfyUI, or any OpenAI-compatible API).
+  Configure MeiGen MCP credentials privately, or set up a local ComfyUI or
+  OpenAI-compatible provider for ordinary image generation. Use for /meigen:setup,
+  "configure meigen", "add API key", or connection setup requests.
 ---
 
-# MeiGen Plugin Setup
+# MeiGen Setup
 
-You are guiding the user through configuring the MeiGen plugin for image generation. Follow this flow step by step.
+Guide one decision at a time. Never ask the user to paste a token, API key, authenticated curl command, or credential-bearing config into chat. Never read or print existing credential files, parse secrets from user messages, or echo key prefixes. The user enters secrets through their host's private connection settings, a private editor, or their own terminal outside this conversation.
 
-## Step 0: Detect Platform
+## Choose the connection
 
-Before running any shell commands, detect whether you're on Windows. Many of the commands below assume a Unix shell (macOS / Linux / Git Bash). Quick check:
+The self-hosted Claude marketplace plugin already bundles one local MCP server. Do not add a duplicate server. Other marketplace copies may package different components; inspect their own manifest before prescribing setup. `/meigen:setup` is a Claude Code command, not a command for other MCP hosts.
 
-```bash
-node -e "console.log(process.platform)"
-```
+Public tools such as `search_gallery`, `enhance_prompt`, `get_inspiration`, `list_models`, and `list_skills` work without a key. Five dedicated workflows—Remove Background, Product Detail Images, Marketing Poster, AI Backgrounds, and Upscale—always require MeiGen and purchased credits. ComfyUI and other providers support ordinary `generate_image`; they do not substitute for these five workflows or MeiGen video generation.
 
-- `darwin` / `linux` → Unix shell, use the commands as written
-- `win32` → Windows. **Adjustments**:
-  - **For `2>/dev/null` in Step 1** (e.g. `cat ... 2>/dev/null`, `ls ... 2>/dev/null`): replace with `2>NUL` in cmd or `2>$null` in PowerShell. Or simpler: use a Node check instead, e.g. `node -e "try{console.log(require('fs').readFileSync(require('os').homedir()+'/.config/meigen/config.json','utf8'))}catch{}"`
-  - **For `mkdir -p ~/.config/meigen`**: in PowerShell use `New-Item -ItemType Directory -Force ~/.config/meigen`. Or skip mkdir entirely — when you later call the Write tool with `file_path: ~/.config/meigen/config.json`, Claude Code's harness creates the parent directory automatically (Write creates the **file**, the parent dir is a side-effect).
-  - **Skip `chmod 600`** — NTFS has no chmod, and Windows file permissions are inherited from the parent directory.
-  - **For curl health checks** (Step 3B-1, 3C): Windows 10+ has curl but lacks `head -c`; truncate with `Select-Object -First 5` (PowerShell) or omit the truncation.
-  - The config file lives at `%USERPROFILE%\.config\meigen\config.json` — Node's `os.homedir()` resolves `~` correctly when reading at runtime, so the config path in code works fine.
+For a Skills request, go directly to MeiGen setup. For ordinary image generation, offer MeiGen, the user's ComfyUI installation, or an OpenAI-compatible provider. If a provider is already configured and working, avoid reconfiguration.
 
-## Step 1: Welcome
+## MeiGen credentials
 
-First, check if a config file already exists:
+1. Open https://www.meigen.ai/profile/api-keys and create an API key after signing in.
+2. For the local npm/plugin connection, the user sets `MEIGEN_API_TOKEN` in the environment that launches the MCP process or in the host's private server `env` settings. A terminal variable will not necessarily reach an already-running desktop app.
+3. Alternatively, the user privately edits `~/.config/meigen/config.json` (`%USERPROFILE%\.config\meigen\config.json` on Windows) and sets `meigenApiToken`. Merge only that field; preserve other provider settings. The user restricts file access to their account (`chmod 600` on Unix).
+4. Restart or reconnect the local host after changing configuration.
 
-```bash
-cat ~/.config/meigen/config.json 2>/dev/null
-```
+For a remote connection to `https://www.meigen.ai/api/mcp`, use the host's private HTTP header settings with `Authorization: Bearer <your MeiGen API key>`. Do not add this secret to a shared project file. If the host cannot provide this authentication, use the local npm connection instead.
 
-Also check for existing ComfyUI workflows:
+Buying credits: https://www.meigen.ai/profile (mobile: https://www.meigen.ai/m/premium). Skills and MeiGen API-token generation use purchased credits only; daily free credits and Web free attempts cannot be used. `list_skills` supplies current Skill prices. The model-comparison page is for pricing, not checkout.
 
-```bash
-ls ~/.config/meigen/workflows/*.json 2>/dev/null
-```
+## ComfyUI for ordinary images
 
-If config exists, show the current configuration (mask API keys: show first 10 chars + "...") and any saved workflows. Ask if they want to reconfigure.
+Ask only for a non-secret server URL if it differs from `http://localhost:8188`. The user sets `comfyuiUrl` in the private MeiGen config. Confirm reachability using a bounded request to `/system_stats` only when needed; do not print credentials or a large machine inventory.
 
-If no config exists, present this introduction:
+Ask for an actual exported ComfyUI API-format workflow file path. Import with `comfyui_workflow(action="import", filePath=..., name=...)`; inspect its detected nodes with `action="view"`. The export UI varies by ComfyUI version; use its current API-format export option. Configure `comfyuiDefaultWorkflow` if desired. Preserve other settings.
 
-> **MeiGen Plugin Configuration**
->
-> This is optional. Without configuration, you can still use free features:
-> - Search gallery for inspiration and prompts
-> - Enhance simple ideas into professional prompts
-> - Browse available AI models
->
-> Configuring a provider unlocks **image generation**.
+## OpenAI-compatible providers for ordinary images
 
-Then proceed to Step 2.
+Ask for the non-secret base URL and model ID, using the provider's current documentation. The user privately configures `OPENAI_API_KEY`, optionally `OPENAI_BASE_URL` and `OPENAI_MODEL`, or `openaiApiKey`, `openaiBaseUrl`, and `openaiModel` in the private MeiGen config. Do not solicit an API key or curl example. Do not infer model support from another provider's model names.
 
-## Step 2: Choose Provider
+## Verify and continue
 
-Present these options to the user:
+After the user confirms configuration is saved and the host is reconnected, use `list_skills` or `list_models` to verify that tools are reachable. These public calls do not prove that a paid API key is valid or that sufficient credits exist. Do not run a paid generation merely to test setup; resume only the user's authorized creation request.
 
-### Option A: MeiGen Platform (Recommended)
-
-- Supports **GPT Image 2.0**, **Nanobanana 2**, **Seedream 5.0** and more
-- Reference image support for style transfer
-- No additional accounts needed — just get a token from meigen.ai
-
-### Option B: ComfyUI (Local)
-
-- Use your **local ComfyUI** installation for image generation
-- Full control over models, samplers, and workflow settings
-- No cloud API needed — runs entirely on your machine
-- Import your own workflow from ComfyUI
-
-### Option C: Custom OpenAI-Compatible API
-
-- Use your own **OpenAI**, **Together AI**, **Fireworks AI**, or any OpenAI-compatible service
-- Bring your own API key and billing
-- Supports any model that uses the OpenAI `/v1/images/generations` endpoint
-
-### Option D: Import from curl Example
-
-- Already have a working curl command from your API provider's docs? Paste it directly!
-- We'll automatically extract the API key, base URL, and model name
-
-### Option E: Skip image generation for now
-
-- Free features still available (inspiration search, prompt enhancement, model listing)
-- You can run `/meigen:setup` anytime later to enable image generation
-
-If user chooses **Skip**, say goodbye and exit. Otherwise continue to the appropriate Step 3.
-
-## Step 3A: MeiGen Platform Setup
-
-Ask the user:
-
-> Do you already have a MeiGen API token, or do you need to create one?
-
-### If they need to create one:
-
-Provide these instructions:
-
-1. Go to **https://www.meigen.ai**
-2. Sign in or create an account
-3. Navigate to **Settings** (click your avatar) → **API Keys**
-4. Click **Create API Key**, give it a name
-5. Copy the token (starts with `meigen_sk_`)
-
-Then ask them to paste the token.
-
-### If they already have one:
-
-Ask them to paste their `meigen_sk_...` token.
-
-### Validate the token:
-
-- Must start with `meigen_sk_`
-- Must be at least 30 characters long
-
-If valid, proceed to **Step 4** with this config:
-
-```json
-{
-  "meigenApiToken": "<the token>"
-}
-```
-
-## Step 3B: ComfyUI (Local) Setup
-
-### 3B-1: Check Connection
-
-Ask the user for their ComfyUI server URL:
-
-> What is your ComfyUI server URL? (default: `http://localhost:8188`)
-
-Test the connection:
-
-```bash
-curl -s <URL>/system_stats | head -c 200
-```
-
-- **Success**: Show confirmation and continue to 3B-2
-- **Failure**: Tell the user:
-  > Cannot connect to ComfyUI at `<URL>`. Please make sure:
-  > 1. ComfyUI is running (start it with `python main.py` or your launcher)
-  > 2. The URL and port are correct
-  > 3. No firewall is blocking the connection
-
-### 3B-2: Import Workflow
-
-Explain the workflow export process to the user:
-
-> To use ComfyUI with this plugin, you need to export a workflow in **API format**:
->
-> 1. Open ComfyUI in your browser (usually `http://localhost:8188`)
-> 2. Load or create your preferred workflow
-> 3. Click **⚙️ Settings** → enable **"Enable Dev mode options"**
-> 4. Click the **"Save (API Format)"** button that appears
-> 5. Save the downloaded `.json` file somewhere convenient
-
-Then ask them to provide the file path:
-
-> Please provide the path to your exported workflow JSON file:
-> Example: `~/Downloads/workflow_api.json`
-
-Use the `comfyui_workflow` tool with action `import` to import the workflow:
-
-- Ask for a short name for the workflow (e.g., "txt2img", "anime", "realistic")
-- Call: `comfyui_workflow import` with `filePath` and `name`
-- Show the detected nodes and parameters to the user for confirmation
-
-If the import succeeds, ask if they want to import additional workflows. If yes, repeat this step.
-
-### 3B-3: Save Configuration
-
-Build the config JSON:
-
-```json
-{
-  "comfyuiUrl": "<the URL, omit if http://localhost:8188>",
-  "comfyuiDefaultWorkflow": "<the first imported workflow name>"
-}
-```
-
-Proceed to **Step 4** to save. The workflow files are already saved by the import step.
-
-## Step 3C: Custom OpenAI-Compatible API Setup
-
-Collect the following information. Present common presets first for convenience:
-
-### Quick Presets
-
-| Service | Base URL | Default Model |
-|---------|----------|---------------|
-| **OpenAI** | `https://api.openai.com` (default) | `gpt-image-2` |
-| **Together AI** | `https://api.together.xyz/v1` | (check their docs) |
-| **Fireworks AI** | `https://api.fireworks.ai/inference/v1` | (check their docs) |
-
-Ask the user to either pick a preset or provide custom values.
-
-### Required Fields
-
-1. **API Key** (required): Their API key for the service
-   - Example: `sk-...` for OpenAI
-
-2. **Base URL** (optional): API endpoint URL
-   - Default: `https://api.openai.com`
-   - Only needed if using a non-OpenAI service
-
-3. **Model Name** (optional): Which model to use
-   - Default: `gpt-image-2`
-   - Different services use different model names
-
-### Optional: Test the connection
-
-After collecting the info, suggest testing with curl:
-
-```bash
-curl -s <BASE_URL>/v1/models \
-  -H "Authorization: Bearer <API_KEY>" | head -c 500
-```
-
-This helps catch invalid keys or wrong URLs before saving.
-
-Proceed to **Step 4** with config from the collected fields (see bottom of this section for format).
-
-Only include fields that differ from defaults. Omit `openaiBaseUrl` if it's `https://api.openai.com`, omit `openaiModel` if it's `gpt-image-2`.
-
-## Step 3D: Import from curl Example
-
-Ask the user to paste their curl command. Common formats they might paste:
-
-**Format 1: Image generation endpoint**
-```bash
-curl https://api.openai.com/v1/images/generations \
-  -H "Authorization: Bearer sk-xxx" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-image-2", "prompt": "a cat", "n": 1, "size": "1024x1024"}'
-```
-
-**Format 2: Simple model list test**
-```bash
-curl https://api.together.xyz/v1/models \
-  -H "Authorization: Bearer xxx"
-```
-
-**Format 3: With -u flag or other auth styles**
-```bash
-curl -u :sk-xxx https://api.fireworks.ai/inference/v1/images/generations \
-  -d '{"model": "accounts/fireworks/models/flux", "prompt": "a cat"}'
-```
-
-### Parse the curl command and extract:
-
-1. **Base URL**: The URL hostname + base path (strip `/v1/images/generations`, `/v1/models`, etc.)
-   - `https://api.openai.com/v1/images/generations` → `https://api.openai.com`
-   - `https://api.together.xyz/v1/models` → `https://api.together.xyz/v1`
-   - If URL ends with `/v1/...`, keep the `/v1` part only if it's NOT `api.openai.com`
-
-2. **API Key**: From `Authorization: Bearer <key>` header, or `-u :<key>` flag, or `--header` variants
-
-3. **Model**: From the JSON request body `"model": "<value>"` if present
-
-### Show parsed results for confirmation:
-
-> I extracted the following from your curl command:
-> - **API Key**: `sk-xxx...` (first 10 chars)
-> - **Base URL**: `https://api.together.xyz/v1`
-> - **Model**: `black-forest-labs/FLUX.1-schnell`
->
-> Does this look correct?
-
-If user confirms, proceed to **Step 4**. If not, let them correct individual fields.
-
-## Step 4: Save Configuration
-
-Build the config JSON based on the chosen provider:
-
-**For MeiGen:**
-```json
-{
-  "meigenApiToken": "<the token>"
-}
-```
-
-**For ComfyUI:**
-```json
-{
-  "comfyuiUrl": "<url, omit if default>",
-  "comfyuiDefaultWorkflow": "<workflow name>"
-}
-```
-
-**For OpenAI-compatible (manual or curl import):**
-```json
-{
-  "openaiApiKey": "<the key>",
-  "openaiBaseUrl": "<base url, omit if default>",
-  "openaiModel": "<model, omit if default>"
-}
-```
-
-Create the config directory and write the file:
-
-```bash
-mkdir -p ~/.config/meigen
-```
-(On Windows without Git Bash, run `New-Item -ItemType Directory -Force ~/.config/meigen` in PowerShell instead.)
-
-**CRITICAL — merge, don't overwrite.** If `~/.config/meigen/config.json` already exists (you cat'd it in Step 1):
-1. Take the **existing** JSON as your base
-2. Add/replace **only** the fields from the new provider's config (e.g. only `meigenApiToken` when adding MeiGen)
-3. Keep all other fields untouched
-4. Write back the full merged object
-
-Concrete example — existing config has ComfyUI, user is adding MeiGen.
-
-**Before (the existing file you cat'd in Step 1):**
-```json
-{ "comfyuiUrl": "http://localhost:8188", "comfyuiDefaultWorkflow": "txt2img" }
-```
-
-**After (correct merge — what you should write):**
-```json
-{ "comfyuiUrl": "http://localhost:8188", "comfyuiDefaultWorkflow": "txt2img", "meigenApiToken": "meigen_sk_..." }
-```
-
-**WRONG (overwrite — loses `comfyuiUrl`, do NOT do this):**
-```json
-{ "meigenApiToken": "meigen_sk_..." }
-```
-
-(JSON has no comments — labels live in markdown headings, not inside the fenced blocks.)
-
-Use the Write tool to write the merged JSON to `~/.config/meigen/config.json`.
-
-After writing, set permissions (Unix only — skip on Windows, NTFS uses different permissions):
-
-```bash
-chmod 600 ~/.config/meigen/config.json
-```
-
-## Step 5: Completion
-
-Tell the user:
-
-> Configuration saved! To activate the new settings, please **start a new Claude Code session** (close and reopen, or open a new terminal tab).
->
-> After restarting, you can:
-> - Use `generate_image` to create AI images
-> - Run `list_models` to see available models and workflows
-> - Try: "Generate a beautiful sunset over mountains"
->
-> You can run `/meigen:setup` again anytime to change your configuration.
-
-**For ComfyUI users**, additionally mention:
-
-> ComfyUI tips:
-> - Use `comfyui_workflow list` to see your saved workflows
-> - Use `comfyui_workflow view` to see adjustable parameters (steps, CFG, sampler, etc.)
-> - Ask me to change any workflow parameter — e.g., "increase steps to 30" or "switch sampler to dpmpp_2m"
-> - You can import more workflows anytime with `comfyui_workflow import`
+For the five dedicated workflows, call the dedicated tool directly, without prompt enhancement or a generic image-generation agent. Preserve its `requestId` and follow `nextAction`; after an interrupted submission call `check_skill` with the original ID before any retry. Missing/invalid-key responses need corrected connection settings, not polling. Explain any remaining error without exposing the secret.

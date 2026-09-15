@@ -17,8 +17,13 @@ EXPECTED="meigen@${PKG_VER}"
 DIST_FILES=(
   "README.md"
   "README.zh-CN.md"
+  "COMPOSABLE_WORKFLOWS.md"
+  "COMPOSABLE_WORKFLOWS.zh-CN.md"
   "plugin/README.md"
   "plugin/.mcp.json"
+  "plugin/openclaw.plugin.json"
+  "src/server.ts"
+  "src/lib/skill-guidance.ts"
   "openclaw/SKILL.md"
   "openclaw/references/troubleshooting.md"
 )
@@ -26,7 +31,8 @@ DIST_FILES=(
 FAIL=0
 for f in "${DIST_FILES[@]}"; do
   if [[ ! -f "$f" ]]; then
-    echo "::warning::Tracked file missing (delete from check-pinned-npm.sh if intentional): $f"
+    echo "::error::Required distribution file missing: $f"
+    FAIL=1
     continue
   fi
 

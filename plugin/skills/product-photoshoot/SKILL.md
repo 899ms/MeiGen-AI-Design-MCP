@@ -1,10 +1,10 @@
 ---
 name: Product Photoshoot Workflow
 description: >-
-  Multi-angle product imagery workflow. Use when the user wants to "shoot a
+  Optional product imagery planning. Use when the user asks for help to "shoot a
   product", "make e-commerce product images", "product photography set",
   "电商产品图", "产品多角度图", "brand product visuals", or provides a single
-  product photo and asks for marketing-ready variations. Produces 4 distinct
+  product photo and asks for marketing-ready variations. Can suggest distinct
   directions (lifestyle scene, macro detail, scale/context, marketing layout)
   from one reference image. NOT for: portraits, generic illustration, logo
   design, video creation — use other skills or generate_image directly.
@@ -13,7 +13,23 @@ version: 0.1.0
 
 # Product Photoshoot Workflow
 
-Turn one product reference photo into a brand-ready set of 4 distinct images, each emphasizing a different sales angle.
+Turn one product reference photo into a brand-ready set matching the requested count, each emphasizing a different sales angle.
+
+## Optional assistant scope
+
+Use this planning workflow only when the caller asks for creative development. A supplied storyboard, prompt set or approved count/budget can call tools directly. Preserve explicit tool/model/provider, prompt, ratio, references and quality choices. Do not impose a new concept-selection or approval step on resolved inputs. Discovery is available to any workflow; delegation is optional. Return handles/results to the caller, which owns previews, downloads and presentation. Visual descriptions require actual inspection.
+
+## Choosing a dedicated Skill
+
+When choosing a tool for an unresolved request, prefer the dedicated workflow: for transparent cutouts use `remove_background`; for ecommerce detail images use `generate_product_detail_images`; for posters use `generate_marketing_poster`; for white, smart or custom product backgrounds use `generate_ai_background`; for still-image upscaling use `upscale_image`. Call these tools directly. Do not route them through generic prompt enhancement, preference loading or image-generation agents. Preserve an upstream workflow's explicit tool selection. They require MeiGen credentials and purchased credits; ComfyUI and OpenAI-compatible providers cannot run them. No daily free credits or Web free attempts apply.
+
+Use `list_skills` for current inputs, defaults and prices. Ask only for missing required information or unresolved output scope. An explicit requested count/modules/quality already authorizes that scope; do not reconfirm it or add paid images. Product Detail MCP requires explicit `modules` (use `[]` for custom modules only); each selected module is one image. Posters need only a subject; images and copy are optional. Use defaults for unspecified settings and never invent product facts, dates or discounts.
+
+Use real accessible images only. Both remote and local connections expose `upload_skill_image`; local npm also accepts real file paths for the four ordinary image-input workflows. If the host cannot read an attachment, ask for a public direct HTTPS image URL; never invent paths or base64.
+
+**Upscale is a separate original-image path:** pass the original public direct HTTPS PNG/JPEG/WebP URL as `imageUrl`, at most 64 MiB and 64 MP. Local npm also accepts an actual original PNG/JPEG/WebP path in `imageUrl` through its dedicated upload route, preserving source dimensions. For readable attachment bytes, call `upload_skill_image` with `purpose: "upscale"` (base64 up to 3 MiB decoded); use the returned `imageUrl`. Do not use `purpose: "reference"` or generic reference compression for Upscale. If the host cannot read the attachment, request a real public original-image URL. On every MCP submission, including the first, pass `confirmedCredits` from the live `list_skills` quote within the user or upstream workflow accepted budget; reuse an already explicit acceptance. This pre-dispatch recheck is not an atomic spending cap. Use `mode: "crisp"` (default) or `"creative"` as offered by `list_skills`. `allowDownscale` is opt-in: explain that it permits preprocessing to at most 4096px/16 MP and the final output can be smaller than the original; set it only after the user explicitly accepts that tradeoff. Upscale accepts still images, not video. For `upscale_resize_required` or `price_changed`, return the resize/cost decision to the caller. Reuse an already explicit acceptance; otherwise obtain acceptance of the new tradeoff or price before submitting a new `requestId` with accepted `allowDownscale` and `confirmedCredits`. These are changed, confirmed inputs—not a blind retry of an interrupted submission.
+
+The caller generates and persists `requestId` for each logical step. For interrupted submissions, call `check_skill` with the original skill/ID before retrying. Follow `nextAction`, including waiting `afterSeconds`; retry only when instructed, using its exact original ID and parameters. Never use a new ID as a blind retry or automatically pay for failed-module replacements. Auth/payment/input rejections require their indicated action instead of polling. Return structured status, task handles and completed image URLs to the caller, with failed modules and refund states separately. The caller owns display and downloads; end users do not need to manage technical IDs.
 
 ## When to trigger
 
@@ -24,11 +40,11 @@ Turn one product reference photo into a brand-ready set of 4 distinct images, ea
 ## Prerequisites
 
 1. **A reference image is required** — the user MUST provide a product photo (URL or local path). If they have not, ask once: "Please share the product photo you want me to work from." Do NOT try to invent a product without a reference.
-2. Confirm provider is configured (any of MeiGen / OpenAI-compatible / ComfyUI). If not, hand off to `/meigen:setup`.
+2. For the generic photoshoot below, confirm a provider is configured (MeiGen / OpenAI-compatible / ComfyUI). Dedicated Skills require MeiGen. If not, hand off to `/meigen:setup`.
 
 ## The 4 directions
 
-Always plan exactly 4 directions in this order. Present as a table to the user and **ask which to generate**(per UX Rule 8 — always confirm before batch). Include "all four in parallel" as an option.
+These four directions are optional starting points. Match the requested count and existing plan. Ask which directions to use only if that choice is unresolved; do not reconfirm an approved set.
 
 | # | Direction | Aspect | Intent |
 |---|-----------|--------|--------|
@@ -39,15 +55,15 @@ Always plan exactly 4 directions in this order. Present as a table to the user a
 
 ## Generation flow
 
-1. **Read user intent** — product type, brand mood (luxury? playful? minimalist?), color palette. Use `search_gallery(category="Product & Brand")` if you need style references; 239 curated examples are available.
-2. **Plan and present** — write the 4 prompts (distinct, not just one tweaked four ways) and show them to the user. Each prompt MUST:
+1. **Read user intent** — product type, brand mood (luxury? playful? minimalist?), color palette. Use `search_gallery(category="Product & Brand")` if you need style references.
+2. **Plan and present** — write the requested prompts (distinct, not just one tweaked four ways) and show them to the user. Each prompt MUST:
    - Reference the input image's product
    - Specify the direction's intent (lifestyle / macro / scale / marketing)
    - Include lighting direction
    - Mention material handling if relevant (matte, glossy, translucent, metallic)
-3. **AskUserQuestion** — "Pick directions to generate. All four runs ~4 parallel agents — confirm?"
-4. **Generate in parallel** — for the directions chosen, spawn `meigen:image-generator` agents in a single response, each passing the reference image as `referenceImages` and the planned prompt. Omit `aspectRatio` unless the user pinned one — describe the ratio in the prompt instead so each direction gets its own framing.
-5. **Present results** — Image URL + saved path for each, grouped by direction label. **Do NOT describe the generated images** (UX Rule 1).
+3. **Resolve remaining choices only** — proceed with an already authorized prompt set; ask one concise question only when required.
+4. **Generate in parallel** — for the directions chosen, use `meigen:image-generator` agents if available (otherwise direct tool calls), each passing the reference image as `referenceImages` and the planned prompt. Preserve any caller-selected aspectRatio; use a suitable default only when omitted.
+5. **Present results** — Image URL + saved path for each, grouped by direction label. Describe visual details only after actual inspection, and let the caller choose presentation.
 
 ## Prompt templates (starting points — adapt to the actual product)
 
@@ -68,10 +84,10 @@ Always plan exactly 4 directions in this order. Present as a table to the user a
 After the first batch:
 - If user likes one direction → offer "extensions" (different angles of the same direction, color variants, seasonal versions)
 - If a direction misses → ask what to change (mood / palette / placement) and regenerate ONLY that one
-- Never silently regenerate — every retry is explicit
+- Recover interrupted steps with the original IDs. A fresh paid replacement must stay within explicitly authorized replacement scope; otherwise obtain approval.
 
 ## What to skip
 
-- Don't try to "remove background" or "add text" via generate_image — those are post-processing steps the user does separately
-- Don't pick the cheapest model to save credits (UX Rule 5 — default to quality)
+- Use `remove_background` for transparent cutouts and `generate_marketing_poster` for designed marketing copy; these have dedicated server workflows.
+- Preserve the caller-selected model and budget; use live capabilities and prices when choosing omitted settings.
 - Don't add MidJourney `--ar` or other flags in the prompt — pass `aspectRatio` parameter when needed

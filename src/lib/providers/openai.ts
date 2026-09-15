@@ -3,6 +3,10 @@
  * Works with any OpenAI-compatible `/v1/images/generations` endpoint — user supplies key, base URL, and model name.
  */
 
+import { Semaphore } from '../semaphore.js'
+const submissionSemaphore = new Semaphore(4)
+
+import { withHttpResponse, boundedJson, boundedBytes, responseError } from '../generation-http.js'
 import type { ImageProvider, ImageGenerationRequest, ImageGenerationResult } from './types.js'
 
 interface OpenAIImageResponse {
@@ -52,21 +56,15 @@ export class OpenAIProvider implements ImageProvider {
       body.image = request.referenceImages
     }
 
-    const res = await fetch(`${this.baseUrl}/v1/images/generations`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    })
-
-    if (!res.ok) {
-      const errorText = await res.text()
-      throw new Error(`API error ${res.status}: ${errorText}`)
-    }
-
-    const json = await res.json() as OpenAIImageResponse
+    await submissionSemaphore.acquire(request.signal)
+    let json: OpenAIImageResponse
+    try { json = await withHttpResponse(`${this.baseUrl}/v1/images/generations`, {
+      method: 'POST', headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }, 300_000, async response => {
+      const payload = await boundedJson(response, 90 * 1024 * 1024)
+      if (!response.ok) throw responseError(response, payload)
+      return payload as unknown as OpenAIImageResponse
+    }, request.signal) } finally { submissionSemaphore.release() }
 
     const imageData = json.data?.[0]
     if (!imageData) {
@@ -82,12 +80,11 @@ export class OpenAIProvider implements ImageProvider {
 
     // If response contains a URL, download and convert to base64
     if (imageData.url) {
-      const imageRes = await fetch(imageData.url)
-      const buffer = await imageRes.arrayBuffer()
-      return {
-        imageBase64: Buffer.from(buffer).toString('base64'),
-        mimeType: imageRes.headers.get('content-type') || 'image/png',
-      }
+      if (request.download === false) return { imageBase64: '', mimeType: 'image/png', imageUrl: imageData.url }
+      return await withHttpResponse(imageData.url, { redirect: 'error' }, 30_000, async response => {
+        if (!response.ok) throw new Error(`Image download failed (${response.status})`)
+        return { imageBase64: (await boundedBytes(response, 64 * 1024 * 1024)).toString('base64'), mimeType: response.headers.get('content-type') || 'image/png', imageUrl: imageData.url }
+      }, request.signal)
     }
 
     throw new Error('Response contains neither b64_json nor url')

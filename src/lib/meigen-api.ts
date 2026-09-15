@@ -3,9 +3,12 @@
  * Used for MeiGen platform mode — calls the hosted generation API
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
-import { acquireAttempt, markAttemptRetryable, releaseAttempt, suspendAttempt } from './attempt-store.js'
+import { releaseAttempt, suspendAttempt } from './attempt-store.js'
+import { withHttpResponse, boundedJson, responseError, abortableDelay, abortReason } from './generation-http.js'
+import { GenerationError } from './generation-contract.js'
+import { sharedApiSemaphore } from './generation-shared.js'
 
 import type { MeiGenConfig } from '../config.js'
 
@@ -89,11 +92,20 @@ export interface MeiGenModel {
 }
 
 export interface MeiGenGenerationResponse {
+  status?: 'processing' | 'completed' | 'failed'
+  imageUrl?: string | null
+  imageUrls?: string[] | null
+  videoUrl?: string | null
+  mediaType?: 'image' | 'video'
+  creditsStatus?: string
+  pollHintSeconds?: number | null
   success: boolean
   generationId?: string
   modelId?: string        // 后端返回实际使用的模型 ID(MCP 没传 modelId 时走 DB is_default)
   creditsUsed?: number
+  deduped?: boolean
   error?: string
+  failureCode?: string | null
   /** 命中「任务已建但轮询中断」的挂起尝试,未重新提交(直接续查该任务) */
   reusedPrior?: boolean
   /** 幂等尝试句柄(内部):工具层终态 ackAttempt / 轮询中断 suspendAttemptFor */
@@ -116,6 +128,12 @@ export interface MeiGenGenerationStatus {
   videoUrl?: string | null
   mediaType?: 'image' | 'video'
   error: string | null
+  failureCode?: string | null
+  generationId?: string
+  requestId?: string
+  modelId?: string
+  creditsUsed?: number
+  creditsStatus?: string
   /** Server-authoritative poll hint (2026-08-05): remaining seconds the server-side
    * pipeline (provider budget + orphan-refund fallback) can still resolve this job.
    * Keep polling while > 0. Absent on older servers — fall back to local safety valve. */
@@ -156,21 +174,15 @@ export class MeiGenApiClient {
   }
 
   /** List available models (no auth required) */
-  async listModels(activeOnly = true): Promise<MeiGenModel[]> {
+  async listModels(activeOnly = true, signal?: AbortSignal): Promise<MeiGenModel[]> {
     const params = new URLSearchParams()
     if (!activeOnly) params.set('active', 'false')
 
-    const res = await fetch(`${this.baseUrl}/api/models?${params}`)
-    if (!res.ok) {
-      throw new Error(`Failed to fetch models: ${res.status} ${res.statusText}`)
-    }
-
-    const json = await res.json() as { success: boolean; models?: MeiGenModel[]; error?: string }
-    if (!json.success) {
-      throw new Error(json.error || 'Failed to fetch models')
-    }
-
-    return json.models || []
+    return await withHttpResponse(`${this.baseUrl}/api/models?${params}`, {}, 15_000, async response => {
+      const body = await boundedJson(response)
+      if (!response.ok || body.success === false) throw responseError(response, body)
+      return (Array.isArray(body.models) ? body.models : []) as MeiGenModel[]
+    }, signal)
   }
 
   /** Get image details by ID (no auth required) */
@@ -191,10 +203,13 @@ export class MeiGenApiClient {
   async generateImage(params: {
     prompt: string
     modelId?: string
+    modelVariant?: string
     aspectRatio?: string
     resolution?: string
     quality?: string
     referenceImages?: string[]
+    requestId?: string
+    signal?: AbortSignal
   }): Promise<MeiGenGenerationResponse> {
     if (!this.apiToken) {
       throw new Error('MEIGEN_API_TOKEN is required for image generation via MeiGen')
@@ -211,6 +226,7 @@ export class MeiGenApiClient {
     if (params.modelId) {
       body.modelId = params.modelId
     }
+    if (params.modelVariant) body.modelVariant = params.modelVariant
     if (params.resolution) {
       body.resolution = params.resolution
     }
@@ -221,58 +237,27 @@ export class MeiGenApiClient {
       body.referenceImages = params.referenceImages
     }
 
-    return await this.submitWithAttemptKey(body)
+    return await this.submitWithAttemptKey(body, params.requestId, params.signal)
   }
 
   /**
-   * 提交生成请求(2026-08-05 七审重构):并发同参数各拿新键(两张图=两单,不合并);
-   * 网络错误 / 5xx(可能已扣点)→ 键转 retryable 供重试复用;成功 / 4xx 明确拒绝 → 释放。
+   * Submit with the caller-owned UUID. The backend persists input identity and task recovery.
+   * Omission represents a new interactive attempt; composed workflows always provide their saved UUID.
    */
-  private async submitWithAttemptKey(body: Record<string, unknown>): Promise<MeiGenGenerationResponse> {
-    const sig = createHash('sha256').update(JSON.stringify(body)).digest('hex')
-    const { key, reused, priorGenerationId } = acquireAttempt(sig, randomUUID)
-    // 短窗内同参数已成功建单(轮询失败后的宿主重试):不再提交,直接返回原任务
-    // 让调用方续查 —— 提交即扣费,重复提交就是双扣(十审 P1)
-    if (priorGenerationId) {
-      return { success: true, generationId: priorGenerationId, reusedPrior: true, _attempt: { sig, key } } as MeiGenGenerationResponse
-    }
-    let res: Response
-    let json: MeiGenGenerationResponse
+  private async submitWithAttemptKey(body: Record<string, unknown>, requestId: string = randomUUID(), signal?: AbortSignal): Promise<MeiGenGenerationResponse> {
+    // Explicit workflow identity, never inferred from matching prompt parameters.
+    await sharedApiSemaphore.acquire(signal)
     try {
-      res = await fetch(`${this.baseUrl}/api/generate/v2`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ ...body, idempotencyKey: key }),
-      })
-      json = await res.json() as MeiGenGenerationResponse
-    } catch (error) {
-      markAttemptRetryable(sig, key)
-      throw error
-    }
-    if (!res.ok || !json.success) {
-      // 释放语义(九审收窄 + 十审修订):
-      // - 409 idempotency_conflict:服务端明确要求换新键(stale claim),必须释放,
-      //   否则复用键每次刷新 TTL 无限自锁(十审 P1)
-      // - 5xx / 408 / 429:服务端状态不明或瞬时,保留供重试判重
-      // - 复用键遇其他错误:该键可能对应已扣费任务,保留(释放即下次铸新键双扣)
-      const isConflict = res.status === 409
-      const transient = res.status >= 500 || res.status === 408 || res.status === 429
-      if (isConflict) {
-        releaseAttempt(sig, key)
-      } else if (transient || reused) {
-        markAttemptRetryable(sig, key)
-      } else {
-        releaseAttempt(sig, key)
-      }
-      throw new Error(json.error || `Generation failed: ${res.status}`)
-    }
-    // 提交成功 = 任务已建已扣费。键保持 in-flight,生命周期交工具层(十一审):
-    // 终态(成功交付/明确失败)→ ackAttempt 释放,「再来一张」永远新单;
-    // 轮询中断 → suspendAttemptFor 挂起保留 generationId 供续查。
-    return { ...json, _attempt: { sig, key } }
+      return await withHttpResponse(`${this.baseUrl}/api/generate/v2`, {
+        method: 'POST', headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, idempotencyKey: requestId }),
+      }, 90_000, async response => {
+        const json = await boundedJson(response)
+        if (!response.ok || !json.success) throw responseError(response, json)
+        if (typeof json.generationId !== 'string' || !json.generationId) throw new GenerationError('Submission response is missing generationId. Query this requestId before recovering.', 'invalid_response', 502, true)
+        return json as unknown as MeiGenGenerationResponse
+      }, signal)
+    } finally { sharedApiSemaphore.release() }
   }
 
   /** 工具层终态确认:释放幂等尝试(此后同参数是全新生成)。 */
@@ -296,6 +281,8 @@ export class MeiGenApiClient {
     referenceImages?: string[]
     referenceVideo?: string           // 仅 Seedance 2.0:参考视频 URL(续写场景)
     referenceVideoDuration?: number   // deprecated compatibility input; never sent (server probes MP4)
+    requestId?: string
+    signal?: AbortSignal
   }): Promise<MeiGenGenerationResponse> {
     if (!this.apiToken) {
       throw new Error('MEIGEN_API_TOKEN is required for video generation via MeiGen')
@@ -313,22 +300,37 @@ export class MeiGenApiClient {
     if (params.referenceVideo) body.referenceVideo = params.referenceVideo
     // Never send client-reported clip duration: it must not affect request identity or billing.
 
-    return await this.submitWithAttemptKey(body)
+    return await this.submitWithAttemptKey(body, params.requestId, params.signal)
   }
 
   /** Check generation status by ID (no auth required) */
-  async getGenerationStatus(generationId: string): Promise<MeiGenGenerationStatus> {
-    const res = await fetch(
-      `${this.baseUrl}/api/generate/v2/status/${encodeURIComponent(generationId)}`,
-      // 带 token 时服务端做归属校验(2026-08-05 六审 IDOR 收敛;无 token 走公开路径兼容)
-      this.apiToken ? { headers: { Authorization: `Bearer ${this.apiToken}` } } : undefined,
-    )
+  async getGenerationStatus(generationId: string, signal?: AbortSignal): Promise<MeiGenGenerationStatus> {
+    return this.readGeneration(`/api/generate/v2/status/${encodeURIComponent(generationId)}`, signal)
+  }
 
-    if (!res.ok) {
-      throw new Error(`Status check failed: ${res.status} ${res.statusText}`)
-    }
+  /** Caller request identity can recover an accepted job even after a lost POST response or another host. */
+  async getGenerationByRequestId(requestId: string, signal?: AbortSignal): Promise<MeiGenGenerationStatus> {
+    if (!this.apiToken) throw new GenerationError('MEIGEN_API_TOKEN is required to query requestId.', 'authentication_required', 401)
+    return this.readGeneration(`/api/generate/v2/requests/${encodeURIComponent(requestId)}`, signal, true)
+  }
 
-    return await res.json() as MeiGenGenerationStatus
+  private async readGeneration(path: string, signal?: AbortSignal, requestLookup = false): Promise<MeiGenGenerationStatus> {
+    return withHttpResponse(`${this.baseUrl}${path}`, this.apiToken ? { headers: { Authorization: `Bearer ${this.apiToken}` } } : {}, 15_000, async response => {
+      // A missing route (including an HTML gateway response) is not proof that a
+      // previously charged request is absent. Only the recovery API's own code is.
+      const unavailable = () => new GenerationError('The request-recovery endpoint returned an unrecognized 404. Verify the API URL and matching backend deployment; keep this requestId and do not automatically resubmit.', 'endpoint_unavailable', 502)
+      let json: Record<string, unknown>
+      try { json = await boundedJson(response) }
+      catch (error) {
+        abortReason(signal)
+        if (requestLookup && response.status === 404) throw unavailable()
+        throw error
+      }
+      if (requestLookup && response.status === 404 && (json.success !== false || json.code !== 'request_not_found')) throw unavailable()
+      if (!response.ok || json.success === false) throw responseError(response, json)
+      if (!['processing', 'completed', 'failed'].includes(String(json.status))) throw new GenerationError('Status response is incomplete. Keep the same requestId and query again.', 'invalid_response', 502, true)
+      return json as unknown as MeiGenGenerationStatus
+    }, signal)
   }
 
   /**
@@ -346,36 +348,61 @@ export class MeiGenApiClient {
     generationId: string,
     safetyValveMs = POLL_SAFETY_VALVE_MS,
     onProgress?: (elapsedMs: number) => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<MeiGenGenerationStatus> {
+    abortReason(signal)
     const startTime = Date.now()
+    const deadline = startTime + safetyValveMs
     const pollInterval = 3_000
+    const maxConsecutiveErrors = 3
+    let consecutiveErrors = 0
     let lastProgress = 0
+    const interrupted = () => new GenerationError(`Stopped waiting for generation ${generationId}; keep its IDs and use check_generation.`, 'polling_interrupted', 504, true)
+    const controller = new AbortController()
+    const abort = () => controller.abort(signal?.reason)
+    signal?.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(() => controller.abort(interrupted()), Math.max(0, safetyValveMs))
+    try {
+      while (Date.now() < deadline) {
+        let status: MeiGenGenerationStatus
+        try {
+          status = await this.getGenerationStatus(generationId, controller.signal)
+          abortReason(controller.signal)
+          consecutiveErrors = 0
+        } catch (error) {
+          abortReason(controller.signal)
+          const transient = error instanceof GenerationError
+            ? error.retryable && (error.httpStatus === 408 || error.httpStatus === 429 || error.httpStatus >= 500)
+            : error instanceof TypeError
+          if (!transient || ++consecutiveErrors >= maxConsecutiveErrors) throw error
+          const retryAfter = error instanceof GenerationError ? error.details.retryAfterSeconds : undefined
+          const delay = Math.max(pollInterval * 2 ** (consecutiveErrors - 1), typeof retryAfter === 'number' && Number.isFinite(retryAfter) ? retryAfter * 1000 : 0)
+          await abortableDelay(Math.min(delay, Math.max(0, deadline - Date.now())), controller.signal)
+          continue
+        }
 
-    while (Date.now() - startTime < safetyValveMs) {
-      const status = await this.getGenerationStatus(generationId)
+        if (status.status === 'completed' || status.status === 'failed') {
+          return status
+        }
 
-      if (status.status === 'completed' || status.status === 'failed') {
-        return status
+        // Server-authoritative stop: observation window exhausted (orphan refund has
+        // landed or is imminent) — no point waiting further.
+        if (typeof status.pollHintSeconds === 'number' && status.pollHintSeconds <= 0) {
+          return status
+        }
+
+        const elapsed = Date.now() - startTime
+        if (onProgress && elapsed - lastProgress >= 15_000) {
+          await onProgress(elapsed)
+          lastProgress = elapsed
+        }
+
+        await abortableDelay(Math.min(pollInterval, Math.max(0, deadline - Date.now())), controller.signal)
       }
-
-      // Server-authoritative stop: observation window exhausted (orphan refund has
-      // landed or is imminent) — no point waiting further.
-      if (typeof status.pollHintSeconds === 'number' && status.pollHintSeconds <= 0) {
-        throw new Error(
-          `Generation still processing after server observation window (job ${generationId}); ` +
-            'it may still complete — check your gallery, credits auto-refund on failure.'
-        )
-      }
-
-      const elapsed = Date.now() - startTime
-      if (onProgress && elapsed - lastProgress >= 15_000) {
-        await onProgress(elapsed)
-        lastProgress = elapsed
-      }
-
-      await new Promise(resolve => setTimeout(resolve, pollInterval))
+      throw interrupted()
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
     }
-
-    throw new Error(`Generation timed out after ${Math.round((Date.now() - startTime) / 1000)}s (local safety valve)`)
   }
 }

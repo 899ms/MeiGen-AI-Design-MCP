@@ -1,3 +1,4 @@
+import { searchPreviewUrl } from '../lib/search-media.js'
 /**
  * search_gallery Tool — free, no auth required
  * Semantic search via website API (vector + keyword hybrid), with local fallback
@@ -110,7 +111,7 @@ function formatApiResults(results: ApiSearchResult[]): string {
       ? promptText.slice(0, 150).replace(/\n/g, ' ') + '...'
       : promptText.replace(/\n/g, ' ')
 
-    const imageUrl = item.thumbnail_url || (item.media_urls?.[0])
+    const imageUrl = searchPreviewUrl(item)
     const author = item.author_display_name || item.author_username || 'Unknown'
     const model = item.model || 'unknown'
 

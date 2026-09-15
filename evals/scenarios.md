@@ -1,123 +1,47 @@
-# Eval Scenarios
+# Eval scenarios
 
-Manual / smoke-test scenarios for MeiGen MCP. Use these to catch regressions when changing tool behavior, instructions, or model routing.
+Manual host-level checks complement `pnpm test`; run with the locally built 2.0.0 package and a controlled backend before public release. Use current tool schemas, server instructions and [the workflow contract](../COMPOSABLE_WORKFLOWS.md). Real paid-provider checks require an explicitly approved scope and budget.
 
-> **Status**: Currently a manual checklist. There is no automated runner; each scenario is exercised by spinning up Claude Code with the MeiGen MCP server pointed at a non-production token, and observing the agent's behavior.
+| ID | Input or condition | Expected behavior | Failure to catch |
+| --- | --- | --- | --- |
+| G1 | Generate one portrait with a supplied short prompt | Preserve the prompt and requested count; use defaults for omitted settings and generate once | Forced prompt enhancement, another confirmation for already approved scope, extra variants |
+| G2 | Generate using a detailed supplied prompt/model/provider | Preserve all supplied settings | Rewriting the prompt or overriding the selected provider |
+| G3 | Use a real local product photo | Local MCP reads, prepares and uploads the file automatically | Fabricated paths/base64; asking for manual upload when local file access exists |
+| G4 | Add text to this existing image | Pass the reference and requested edit | Re-describing or replacing the existing image |
+| G5 | Generate four already approved concepts | Generate exactly four within the caller's budget and concurrency limit | Forcing the user to choose only one; adding images; omitting requested outputs |
+| G6 | Existing workflow calls with requestId, wait=false, download=false | Return structured task handle; no local download or forced preview | Waiting for completion, inventing output URL, requiring a creative assistant |
+| V1 | Generate one video with resolved model/settings/budget | Submit once; use live model discovery only when needed | Blanket video reconfirmation or switching to image generation |
+| V2 | Animate a supplied first-frame photo | Use firstFrame and a motion prompt | Losing the frame or replacing the prompt with a scene description |
+| V3 | lastFrame without firstFrame | Explain the missing firstFrame and stop before submission | Silent retry or treating the last frame as the first |
+| V4 | Completed result has a different media type than the requested tool, including terminal dedupe/recovery | Keep success, actual mediaType/URLs and original requestedMediaType; return review_media_type | Silently advancing, discarding paid output, saving an image as MP4 or automatically resubmitting |
+| V5 | Transient status-query failures after accepted submission | Retry only observation; stop after three consecutive errors, reset on valid status, honor Retry-After and total deadline | Reporting the paid generation itself as failed, ignoring cancellation/budget, or submitting a replacement |
+| V6 | Observation deadline expires | Keep requestId/generationId, processing/unknown state and recovery action | Claiming cancellation, refund or generation failure without evidence |
+| R1 | Same ordinary request retried while submission lease is active | HTTP 503 + retry timing; npm 1.4.0 and 2.0.0 retain the original ID | HTTP 409 for an in-progress lease causing 1.4.0 to allocate a new ID |
+| R2 | Process restart or missing local receipt | Query the authenticated backend by explicit requestId before reference upload | Uploading another reference URL and conflicting with the accepted input |
+| R3 | Private receipt directory unavailable | Emit receiptWarning and preserve the request ID; use process memory safely | Relaxing permissions, following unsafe symlinks, or blocking every generation |
+| R4 | Cancel a Skill before upload or paid submission | No upload/POST starts; give concise cancellation feedback | Sending a paid request after the cancellation signal |
+| R5 | Cancel after a Skill POST may have been sent | Retain original Skill/request ID and recovery action | Claiming the job was cancelled server-side or retrying under a new ID |
+| R6 | Download fails after successful generation | Return successful media URL with downloadWarning; clean partial files | Losing the result or changing successful generation to failed |
+| R7 | Changed inputs with a reused request ID | Stop on conflict and inspect original attempt | Automatically replacing the ID to evade the conflict |
+| R8 | Accepted generation deleted | Report generation_unavailable with existing identity | Creating a replacement or assuming refund |
+| R9 | Recovery endpoint returns HTML or unknown JSON 404 | Return endpoint_unavailable / check_backend; preserve original IDs and make no paid POST | Treating a missing route as request_not_found or requiring all installed npm copies to be withdrawn |
+| R10 | Recovery endpoint returns JSON request_not_found with HTTP 404 | Verify saved inputs/account; recover an interrupted submission with the same UUID | Minting a replacement UUID or treating any HTTP 404 as equivalent |
+| P1 | No generation provider configured; search inspiration | Public discovery works | Requiring a key for public search |
+| P2 | MeiGen key invalid or missing | Point to the API-key setup page; keep secrets in private host configuration | Asking to paste credentials into chat or making repeated requests |
+| P3 | MeiGen credit balance insufficient | Explain purchased-only API billing and link to the owning account's profile | Claiming daily/free credits apply; replacing the request ID automatically |
+| P4 | OpenAI-compatible provider returns 402 | Direct to that provider's billing configuration | Linking MeiGen top-up or claiming a MeiGen recovery receipt exists |
+| P5 | ComfyUI has a transient history-query error | Continue bounded observation of the original promptId | Resubmitting GPU work or declaring terminal provider failure immediately |
+| S1 | Product-detail request for a specific number of modules | Pass explicit modules and requested count; resolve only missing essential material | Falling back to a hidden three-image MCP default |
+| S2 | Upscale supplied photo | Use original source, accepted live quote and dedicated upscale flow | Generic resizing before consent; missing confirmedCredits |
+| S3 | Host can read attachment bytes | Use upload_skill_image or authenticated /api/skills/upload; remove private metadata | Raw public presign instruction or fabricated attachment access |
+| S4 | Host cannot read attachment | Explain briefly and request a direct image URL or local-MCP file access | Inventing a URL or asking the user to type base64 |
+| S5 | Social thumbnail workflow receives an unresolved campaign poster with supplied copy | Prefer generate_marketing_poster and lay out supplied headline content; reserve blank space only for caller-requested image-only overlays; explicit upstream tool choices still win | Forcing generic image generation or leaving the poster headline blank against intent |
+| S6 | Poster supplies preset, written style and style reference | customStyle overrides styleId; styleImage is the primary visual reference and text a compatible supplement | Treating labels as IDs or copying reference products/text/layout |
+| S7 | First-time host reads Skill schema and examples | Explain extraNotes and distinct image roles; parse and execute published MCP examples against a mock endpoint | Bare ambiguous fields, unused conflicting descriptions or invalid tool-call arguments |
+| S8 | User asks for size, completion time and cost | Read live specifications/prices; distinguish quality, output resolution, reference limits and observation timing | Inventing fixed ETA, hardcoded credit cost or an unsupported resolution argument |
+| S9 | Poster request mixes exact copy with “use a vintage style” | Keep visible wording in content with autoCopy=false; put design directions in extraNotes/customStyle and do not print them verbatim; retain explicitly requested extra display copy | Printing design instructions as a headline or dropping legitimate extra display text |
+| U1 | Successful result | Return actual structured handles and URLs; caller controls presentation | Inventing image contents or forcing intermediate previews |
+| U2 | Price inquiry | Use current catalog/model prices | Repeating model or credit numbers from old text |
+| U3 | Chinese user request | Chinese guidance; technical argument names unchanged | Translating field names or switching language without reason |
 
-## How to use
-
-1. Pick the scenario that matches the change you are about to ship.
-2. Run the prompt under the "Input" header in a fresh Claude Code session.
-3. Compare the agent's behavior against "Expected".
-4. If you see "Acceptable variations", that's a known band of valid outputs.
-5. **Failure mode** = the agent does something that contradicts a load-bearing rule from `SERVER_INSTRUCTIONS` or `DECISIONS.md`. File this as a bug, link the scenario.
-
----
-
-## generate_image
-
-### G1 — Single image, brief prompt
-- **Input**: "Generate a portrait photo of a woman."
-- **Expected**: Agent calls `enhance_prompt` first (brief idea, under 30 words), shows enhanced prompt, **asks for confirmation before generating**, then calls `generate_image` exactly once after user confirms.
-- **Failure modes**: Generates without confirming. Calls `list_models` first. Specifies `model` or `provider` in `generate_image`.
-
-### G2 — Detailed prompt, no enhancement
-- **Input**: "Generate this: A woman in her 30s, soft daylight from a north window, shot on 50mm at f/1.8, shallow DOF, neutral linen wall background, photo by Annie Leibovitz, color graded warm shadows."
-- **Expected**: Agent recognizes this as a detailed prompt (Phase 1 category C). Calls `generate_image` directly without enhancing.
-- **Failure modes**: Calls `enhance_prompt` anyway, bloating the already-good prompt.
-
-### G3 — Local reference image
-- **Input**: "Use ~/Desktop/logo.png as reference and put it on a coffee mug."
-- **Expected**: Agent passes the path directly in `referenceImages` (does not pre-upload). The tool auto-compresses + uploads internally.
-- **Failure modes**: Refuses because "local files need URL". Tries to base64-encode. Asks the user to upload manually.
-
-### G4 — Edit / modify an existing image
-- **Input**: User provides https://example.com/image.png and says "Add the text 'meigen.ai' at the bottom".
-- **Expected**: Short literal prompt ("Add the text 'meigen.ai' at the bottom of this image") + `referenceImages: ["https://example.com/image.png"]`. **Does NOT re-describe the original image** (Phase 1 category D).
-- **Failure modes**: Calls `enhance_prompt` and produces a long re-description of the original image, then asks the model to edit it (compounds the prompt).
-
-### G5 — Batch of N variants
-- **Input**: "Make 4 logo concepts for a coffee shop."
-- **Expected**: Agent plans 4 distinct directions, presents as a table or list, **asks user to pick** before generating any. Includes "all of the above" option.
-- **Failure modes**: Generates all 4 without asking. Generates 1 and stops. Plans 8 directions.
-
----
-
-## generate_video
-
-### V1 — Text-to-video, no model
-- **Input**: "Generate a 5-second video of waves crashing on a beach."
-- **Expected**: Agent confirms before submitting (UX rule 8: video always confirms). Asks for or assumes a video model — `generate_video` requires `model` (no platform default for video).
-- **Failure modes**: Submits without confirming. Calls `generate_image` instead because the agent doesn't notice "video".
-
-### V2 — Image-to-video with first frame
-- **Input**: User provides ~/Desktop/sunset.jpg and says "Animate this — the sun should slowly set."
-- **Expected**: `firstFrame: "~/Desktop/sunset.jpg"`, prompt describes motion only ("the sun slowly sets, soft warm light grading darker, gentle wind in the foreground"), confirms before submit.
-- **Failure modes**: Re-describes the photo instead of describing motion. Skips the image-to-video framing and tries text-to-video.
-
-### V3 — lastFrame without firstFrame
-- **Input**: "Use endframe.jpg as the ending frame, model seedance-2-0."
-- **Expected**: Tool itself rejects with `"lastFrame requires firstFrame to also be provided"`. Agent should explain this to the user and suggest providing both frames.
-- **Failure modes**: Agent retries silently. Agent passes lastFrame as firstFrame ("close enough").
-
-### V4 — Wrong model id (image model passed)
-- **Input**: User explicitly asks for `generate_video model: "gpt-image-2"`.
-- **Expected**: One of two paths:
-  (a) Tool submits, backend completes, `mediaType !== 'video'` guard fires → agent gets a clear "use generate_image" error and explains to user.
-  (b) Backend rejects upfront with "invalid model for video" → agent calls `list_models` and shows valid video models.
-- **Failure modes**: Agent retries without changing model. Agent saves the resulting jpg as `.mp4`.
-
-### V5 — Timeout retry behavior
-- **Input**: A video generation that times out (480s). Agent receives the timeout error with `Generation ID: ...` and "credits have been pre-deducted" hint.
-- **Expected**: Agent does NOT immediately retry. It tells the user the job may still be running, gives the generation ID, and points to https://www.meigen.ai before retrying.
-- **Failure modes**: Agent retries automatically. Agent claims the job failed when it may still be processing.
-
----
-
-## Provider routing & gating
-
-### P1 — Free features without provider
-- **Input**: No provider configured. User says "find me some inspiration on cyberpunk."
-- **Expected**: `search_gallery` works (free tool). Agent presents results without prompting for a token.
-- **Failure modes**: Agent demands a token before search.
-
-### P2 — generate_image without provider
-- **Input**: No provider configured. User says "Generate a sunset image."
-- **Expected**: Tool returns a clear "No image generation providers configured" error with setup steps. Agent relays this and offers `/meigen:setup`.
-- **Failure modes**: Agent invents a fallback path. Agent retries with different params hoping one works.
-
-### P3 — Model browsing
-- **Input**: "What models are available?"
-- **Expected**: Agent calls `list_models`. Output lists Image and Video sections. Hidden models (V7, Niji 7, legacy Seedance Pro rows) do NOT appear.
-- **Failure modes**: Agent lists models from training data instead of calling `list_models`. Output includes hidden legacy rows.
-
----
-
-## UX rules (cross-cutting)
-
-### U1 — Don't describe generated images
-- **Input**: After a successful `generate_image`, user says nothing.
-- **Expected**: Agent presents Image URL + saved path. **Does NOT** describe what's in the image (UX rule 1 — agent cannot see it).
-- **Failure modes**: Agent writes "Here's a beautiful sunset over the mountains with golden light..." after the URL.
-
-### U2 — No credit numbers from training data
-- **Input**: "How much does this cost?"
-- **Expected**: Agent points to https://www.meigen.ai/model-comparison. Does NOT quote "10 credits" or any number from training memory.
-- **Failure modes**: "About 10 credits per generation" — verbatim from old docs. (See DECISIONS.md → "No credit / pricing numbers in shipped code".)
-
-### U3 — Reply in user's language
-- **Input** (Chinese): "帮我生成一张猫咪的照片"
-- **Expected**: Agent replies in Chinese throughout. Technical args (`aspectRatio: "1:1"`) stay English.
-- **Failure modes**: Agent replies in English. Agent translates technical args ("纵横比: 一比一").
-
----
-
-## Adding new scenarios
-
-When you fix a bug or land a behavioral change, write the scenario *before* the fix lands so the regression case is captured. Each entry:
-
-- Short id (G/V/P/U + number)
-- One-line title
-- Concrete input (prompt or sequence)
-- Expected behavior, anchored to a rule from SERVER_INSTRUCTIONS or DECISIONS.md
-- 1–3 failure modes worth catching
+To add a regression case, give a concrete trigger, the expected observable result and the incorrect action to catch. Keep this checklist aligned with the current atomic-tool contract; optional creative guidance is not a mandatory prerequisite.

@@ -10,14 +10,16 @@ keep-coding-instructions: true
 
 Output only what is strictly necessary. No creative commentary, no explanations, no suggestions unless asked.
 
+This opt-in style applies only to final user-facing creative responses. It does not change tool parameters, authorization, scheduling or the format requested by an upstream caller. Preserve task handles and errors in intermediate results. Describe generated imagery only after actual inspection.
+
 ## Rules
 
 1. After generating an image: show the image and the file path. Nothing else.
 2. After searching gallery: compact numbered list — preview image + one-line description
-3. After enhancing a prompt: show the enhanced prompt, then "Generate?"
+3. After enhancing a prompt: show the enhanced prompt; ask about generation only if scope is unresolved
 4. Never suggest next steps unless asked
 5. Never explain creative reasoning
-6. Never describe what an image looks like
+6. Never invent details of an image that has not been inspected
 7. For errors: state the error and the fix. Nothing else.
 
 ## Format

@@ -1,24 +1,22 @@
 #!/bin/bash
-# MeiGen Plugin — PostToolUse hook for generate_image
-# Auto-opens the saved image on macOS after generation
+# Optional user-facing preview. Workflow callers own intermediate presentation.
+[ "${MEIGEN_AUTO_OPEN:-0}" = "1" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 
-# Read JSON input from stdin
-INPUT=$(cat)
+# Prefer structured results. Retain the old text format for older MCP servers.
+SAVED_PATH=$(jq -er '
+  .tool_response as $response |
+  ($response.structuredContent.savedPath //
+    ([$response.content[]? | select(.type == "text") | .text |
+      split("\n")[] | select(test("^-? ?Saved to: ")) |
+      sub("^-? ?Saved to: "; "")][0]) // empty) |
+  select(type == "string" and length > 0)
+' 2>/dev/null) || exit 0
 
-# Extract "Saved to: /path/to/file" from the tool response text content
-SAVED_PATH=$(echo "$INPUT" | \
-  jq -r '.tool_response.content[]? | select(.type=="text") | .text // empty' 2>/dev/null | \
-  grep -oE 'Saved to: (.+)' | head -1 | sed 's/Saved to: //' | xargs)
-
-# Exit silently if no saved path found
-[ -z "$SAVED_PATH" ] && exit 0
-
-# Exit silently if file doesn't exist
-[ ! -f "$SAVED_PATH" ] && exit 0
-
-# Open in Preview on macOS (non-blocking)
+# Server output paths are absolute. Quoting preserves spaces and shell characters.
+case "$SAVED_PATH" in /*) ;; *) exit 0 ;; esac
+[ -f "$SAVED_PATH" ] || exit 0
 if [ "$(uname)" = "Darwin" ]; then
-  open "$SAVED_PATH" &
+  open "$SAVED_PATH" >/dev/null 2>&1 &
 fi
-
 exit 0

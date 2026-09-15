@@ -4,6 +4,8 @@
  * generation fills in prompt/seed/size at runtime.
  */
 
+import { withHttpResponse, boundedJson, boundedBytes, abortableDelay, abortReason, responseError } from '../generation-http.js'
+import { GenerationError } from '../generation-contract.js'
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, unlinkSync, existsSync } from 'fs'
 import { join, basename } from 'path'
 import { homedir } from 'os'
@@ -266,13 +268,9 @@ export class ComfyUIProvider {
     this.baseUrl = baseUrl.replace(/\/$/, '')
   }
 
-  async checkConnection(): Promise<{ ok: boolean; error?: string }> {
+  async checkConnection(signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 3000)
-      // Use root URL — served by all ComfyUI versions (web UI)
-      await fetch(this.baseUrl, { signal: controller.signal })
-      clearTimeout(timeout)
+      await withHttpResponse(this.baseUrl, {}, 3000, async response => { await response.body?.cancel() }, signal)
       return { ok: true }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -280,31 +278,25 @@ export class ComfyUIProvider {
   }
 
   /** Upload an image to ComfyUI's input directory */
-  async uploadImage(imageBuffer: Buffer, filename: string): Promise<string> {
+  async uploadImage(imageBuffer: Buffer, filename: string, signal?: AbortSignal): Promise<string> {
     const blob = new Blob([imageBuffer])
     const formData = new FormData()
     formData.append('image', blob, filename)
     formData.append('overwrite', 'true')
 
-    const res = await fetch(`${this.baseUrl}/upload/image`, {
-      method: 'POST',
-      body: formData,
-    })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      throw new Error(`ComfyUI image upload failed (${res.status}): ${errText}`)
-    }
-
-    const json = await res.json() as { name: string; subfolder: string; type: string }
+    const json = await withHttpResponse(`${this.baseUrl}/upload/image`, { method: 'POST', body: formData }, 30_000, async response => {
+      if (!response.ok) throw new Error(`ComfyUI image upload failed (${response.status})`)
+      return await boundedJson(response) as { name: string }
+    }, signal)
     return json.name
   }
 
   async listCheckpoints(): Promise<string[]> {
     try {
-      const res = await fetch(`${this.baseUrl}/models/checkpoints`)
-      if (!res.ok) return []
-      return await res.json() as string[]
+      return await withHttpResponse(`${this.baseUrl}/models/checkpoints`, {}, 10_000, async response => {
+        if (!response.ok) return []
+        return JSON.parse((await boundedBytes(response, 2 * 1024 * 1024)).toString('utf8')) as string[]
+      })
     } catch {
       return []
     }
@@ -319,9 +311,11 @@ export class ComfyUIProvider {
     prompt: string,
     options?: {
       referenceImages?: string[]
+      signal?: AbortSignal
+      download?: boolean
     },
     onProgress?: (elapsedMs: number) => Promise<void>,
-  ): Promise<{ imageBase64: string; mimeType: string; referenceImageWarning?: string }> {
+  ): Promise<{ imageBase64: string; mimeType: string; imageUrl?: string; referenceImageWarning?: string }> {
     // 1. Deep-copy the template
     const wf = JSON.parse(JSON.stringify(workflow)) as ComfyUIWorkflow
 
@@ -349,11 +343,10 @@ export class ComfyUIProvider {
 
           if (source.startsWith('http://') || source.startsWith('https://')) {
             // Remote URL: download first
-            const imgRes = await fetch(source)
-            if (!imgRes.ok) {
-              throw new Error(`Failed to download reference image from ${source}: ${imgRes.status}`)
-            }
-            imgBuffer = Buffer.from(await imgRes.arrayBuffer())
+            imgBuffer = await withHttpResponse(source, { redirect: 'error' }, 30_000, async response => {
+              if (!response.ok) throw new Error(`Reference download failed (${response.status})`)
+              return boundedBytes(response, 32 * 1024 * 1024)
+            }, options.signal)
             ext = source.match(/\.(jpe?g|png|webp|gif)(\?|$)/i)?.[1] || 'png'
           } else {
             // Local file path: read directly (skip R2 roundtrip)
@@ -367,7 +360,7 @@ export class ComfyUIProvider {
 
           // Upload to ComfyUI's input directory
           const filename = `ref_${Date.now()}_${i}.${ext}`
-          const uploadedName = await this.uploadImage(imgBuffer, filename)
+          const uploadedName = await this.uploadImage(imgBuffer, filename, options.signal)
 
           // Inject into LoadImage node
           wf[nodeId].inputs.image = uploadedName
@@ -378,18 +371,12 @@ export class ComfyUIProvider {
     }
 
     // 7. Submit workflow
-    const submitRes = await fetch(`${this.baseUrl}/prompt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: wf }),
-    })
-
-    if (!submitRes.ok) {
-      const errText = await submitRes.text()
-      throw new Error(`ComfyUI prompt submission failed (${submitRes.status}): ${errText}`)
-    }
-
-    const { prompt_id, node_errors } = await submitRes.json() as ComfyUIPromptResponse
+    const { prompt_id, node_errors } = await withHttpResponse(`${this.baseUrl}/prompt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf }),
+    }, 30_000, async response => {
+      if (!response.ok) throw new Error(`ComfyUI prompt submission failed (${response.status})`)
+      return await boundedJson(response) as unknown as ComfyUIPromptResponse
+    }, options?.signal)
 
     if (node_errors && Object.keys(node_errors).length > 0) {
       throw new Error(`ComfyUI node errors: ${JSON.stringify(node_errors)}`)
@@ -400,9 +387,10 @@ export class ComfyUIProvider {
     const pollInterval = 2_000
     const startTime = Date.now()
     let lastProgress = 0
+    let consecutiveErrors = 0
 
     while (Date.now() - startTime < timeoutMs) {
-      await new Promise(r => setTimeout(r, pollInterval))
+      await abortableDelay(pollInterval, options?.signal)
 
       const elapsed = Date.now() - startTime
       if (onProgress && elapsed - lastProgress >= 15_000) {
@@ -410,10 +398,22 @@ export class ComfyUIProvider {
         lastProgress = elapsed
       }
 
-      const histRes = await fetch(`${this.baseUrl}/history/${prompt_id}`)
-      if (!histRes.ok) continue
-
-      const history = await histRes.json() as Record<string, ComfyUIHistoryEntry>
+      let history: Record<string, ComfyUIHistoryEntry>
+      try {
+        const remainingMs = timeoutMs - (Date.now() - startTime)
+        if (remainingMs <= 0) break
+        history = await withHttpResponse(`${this.baseUrl}/history/${prompt_id}`, {}, Math.min(15_000, remainingMs), async response => {
+          if (!response.ok) throw responseError(response, { error: `ComfyUI history query failed (${response.status}); check the existing job ${prompt_id} before submitting again.` })
+          return await boundedJson(response) as unknown as Record<string, ComfyUIHistoryEntry>
+        }, options?.signal)
+        consecutiveErrors = 0
+      } catch (error) {
+        abortReason(options?.signal)
+        const transient = error instanceof TypeError || (error instanceof GenerationError && (error.retryable || error.code === 'download_too_large'))
+        if (!transient) throw error
+        if (++consecutiveErrors >= 3) throw new GenerationError(`ComfyUI status could not be read for job ${prompt_id}. Check this existing job in ComfyUI before submitting another workflow.`, 'status_unavailable', 503, false)
+        continue
+      }
       const entry = history[prompt_id]
       if (!entry) continue
 
@@ -434,16 +434,12 @@ export class ComfyUIProvider {
           })
 
           // 10. Download image
-          const imgRes = await fetch(`${this.baseUrl}/view?${params}`)
-          if (!imgRes.ok) {
-            throw new Error(`Failed to download image from ComfyUI: ${imgRes.status}`)
-          }
-
-          const buffer = await imgRes.arrayBuffer()
-          const base64 = Buffer.from(buffer).toString('base64')
-          const mimeType = imgRes.headers.get('content-type') || 'image/png'
-
-          return { imageBase64: base64, mimeType, referenceImageWarning }
+          const imageUrl = `${this.baseUrl}/view?${params}`
+          if (options?.download === false) return { imageBase64: '', mimeType: 'image/png', imageUrl, referenceImageWarning }
+          return await withHttpResponse(imageUrl, {}, 30_000, async response => {
+            if (!response.ok) throw new Error(`ComfyUI image download failed (${response.status})`)
+            return { imageBase64: (await boundedBytes(response, 64 * 1024 * 1024)).toString('base64'), mimeType: response.headers.get('content-type') || 'image/png', imageUrl, referenceImageWarning }
+          }, options?.signal)
         }
       }
 

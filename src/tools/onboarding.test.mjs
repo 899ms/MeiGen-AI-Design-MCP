@@ -1,0 +1,201 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import serverModule from '../server.js'
+
+const { createServer } = serverModule
+const requestId = '11111111-2222-4333-8444-555555555555'
+const config = { meigenBaseUrl:'https://www.meigen.ai', uploadGatewayUrl:'https://gen.meigen.ai', openaiBaseUrl:'https://api.openai.com', openaiModel:'gpt-image-2' }
+
+async function session(token, fetchResponse, run) {
+  const previous = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({url:String(url),body:init?.body ? JSON.parse(init.body) : undefined})
+    if (!fetchResponse) throw new Error('Unexpected network request from an anonymous user')
+    return fetchResponse(String(url),init)
+  }
+  const server = createServer({...config,meigenApiToken:token})
+  const client = new Client({name:'first-time-user',version:'1.0.0'})
+  const [clientTransport,serverTransport] = InMemoryTransport.createLinkedPair()
+  try {
+    await server.connect(serverTransport)
+    await client.connect(clientTransport)
+    await run(client,requests)
+  } finally {
+    await client.close()
+    await server.close()
+    globalThis.fetch = previous
+  }
+}
+const call = (client,name,args) => client.callTool({name,arguments:args})
+
+test('fresh anonymous MCP client sees scenarios, source materials, version and host setup', async () => {
+  await session(undefined,undefined,async client => {
+    assert.equal(client.getServerVersion().version,'2.0.0')
+    const {tools}=await client.listTools()
+    assert.equal(tools.length,17)
+    const description=name=>tools.find(t=>t.name===name).description
+    assert.match(description('remove_background'),/Required: one actual source photo/)
+    assert.match(description('generate_product_detail_images'),/one actual product photo.*resolved image count/)
+    assert(tools.find(t=>t.name==='generate_product_detail_images').inputSchema.required.includes('modules'))
+    assert.match(description('generate_marketing_poster'),/An image is not required/)
+    assert.match(description('generate_ai_background'),/custom needs a background description/)
+    assert.match(client.getInstructions(),/Authorization: Bearer/)
+    assert.match(client.getInstructions(),/https:\/\/www.meigen.ai\/api\/mcp/)
+    assert.match(client.getInstructions(),/https:\/\/www.meigen.ai\/profile/)
+    assert.doesNotMatch(client.getInstructions(),/eligible for daily free credits/)
+  })
+})
+
+test('missing key guides actual key creation and both host credential fields without a network call', async () => {
+  await session(undefined,undefined,async (client,requests) => {
+    const r=await call(client,'generate_marketing_poster',{requestId,brand:'Coffee weekend'})
+    assert.equal(r.isError,true)
+    assert.equal(r.structuredContent.nextAction.url,'https://www.meigen.ai/profile/api-keys')
+    assert.match(r.structuredContent.nextAction.message,/desktop browser/)
+    assert.match(r.structuredContent.nextAction.message,/MEIGEN_API_TOKEN.*Authorization: Bearer/)
+    assert.match(r.structuredContent.nextAction.message,/Never request the secret in chat/)
+    assert.equal(requests.length,0)
+  })
+})
+
+test('invalid key tells a fresh client to replace credentials and stops polling', async () => {
+  await session('meigen_sk_test',()=>Response.json({success:false,error:'Invalid API token'},{status:401}),async client=>{
+    const r=await call(client,'generate_marketing_poster',{requestId,brand:'Coffee weekend'})
+    assert.equal(r.structuredContent.nextAction.type,'configure_auth')
+    assert.match(r.structuredContent.nextAction.message,/invalid\/expired\/revoked/)
+    assert.equal(r.structuredContent.nextAction.tool,undefined)
+  })
+})
+
+test('insufficient balance retains exact required/available and points to purchasing in the same account', async () => {
+  await session('meigen_sk_test',()=>Response.json({success:false,error:'Insufficient credits',required:5,available:2},{status:402}),async client=>{
+    const r=await call(client,'generate_marketing_poster',{requestId,brand:'Coffee weekend'})
+    const body=r.structuredContent
+    assert.equal(body.required-body.available,3)
+    assert.equal(body.nextAction.url,'https://www.meigen.ai/profile')
+    assert.match(body.nextAction.message,/same MeiGen account.*Top Up/)
+    assert.match(body.nextAction.message,/purchased credits only/)
+    assert.match(body.nextAction.message,/new requestId/)
+    assert.equal(body.nextAction.tool,undefined)
+  })
+})
+
+test('upload failures distinguish correcting a large source from one bounded retry, and never submit generation', async () => {
+  for (const [status,action,pattern] of [[413,'prepare_image',/8 MiB.*3 MiB/],[503,'retry_upload',/once.*No generation was submitted or charged/]]) {
+    await session('meigen_sk_test',()=>Response.json({success:false,error:'Image preparation failed'},{status}),async (client,requests)=>{
+      const r=await call(client,'upload_skill_image',{imageBase64:'AAAA'})
+      assert.equal(r.structuredContent.nextAction.type,action)
+      assert.match(r.structuredContent.nextAction.message,pattern)
+      assert.equal(requests.length,1)
+      assert.match(requests[0].url,/\/skills\/upload$/)
+      assert.equal(r.structuredContent.nextAction.tool,undefined)
+    })
+  }
+})
+
+test('subject-only poster and explicit two-image product detail are forwarded without invented requirements', async () => {
+  await session('meigen_sk_test',()=>Response.json({success:true,generationId:'accepted-job'}),async(client,requests)=>{
+    await call(client,'generate_marketing_poster',{requestId,brand:'Coffee weekend'})
+    assert.equal(requests[0].body.productImages,undefined)
+    await call(client,'generate_product_detail_images',{requestId,productImage:'https://images.meigen.ai/product.png',modules:['hero','detail']})
+    assert.deepEqual(requests[1].body.modules,['hero','detail'])
+    assert.equal(requests[1].body.productName,undefined)
+  })
+})
+
+test('omitting product detail modules cannot accidentally start the HTTP API default three-image batch', async () => {
+  await session('meigen_sk_test',undefined,async(client,requests)=>{
+    const result=await call(client,'generate_product_detail_images',{requestId,productImage:'https://images.meigen.ai/product.png'})
+    assert.equal(result.isError,true)
+    assert.equal(requests.length,0)
+  })
+})
+
+
+test('initial Upscale requires a confirmed quote before any file access or HTTP dispatch', async () => {
+  await session('meigen_sk_test',undefined,async(client,requests)=>{
+    const {tools}=await client.listTools()
+    assert(tools.find(t=>t.name==='upscale_image').inputSchema.required.includes('confirmedCredits'))
+    const result=await call(client,'upscale_image',{requestId,imageUrl:'/nonexistent/original.png'})
+    assert.equal(result.isError,true)
+    assert.match(JSON.stringify(result),/confirmedCredits/)
+    assert.equal(requests.length,0)
+  })
+})
+test('Upscale attachments preserve purpose and send an accepted first-call quote', async () => {
+  await session('meigen_sk_test',(url)=>Response.json(url.endsWith('/upload')
+    ? {success:true,imageUrl:'https://images.meigen.ai/original.png'}
+    : {success:true,generationId:'enhanced-job'}),async(client,requests)=>{
+    const upload=await call(client,'upload_skill_image',{purpose:'upscale',imageBase64:'AAAA'})
+    await call(client,'upscale_image',{requestId,imageUrl:upload.structuredContent.imageUrl,confirmedCredits:2})
+    assert.equal(requests[0].body.purpose,'upscale')
+    assert.equal(requests[1].body.confirmedCredits,2)
+    assert.equal(requests[1].body.allowDownscale,false)
+  })
+})
+test('zero-balance upload directs top-up and same-upload retry without creating a Skill receipt', async () => {
+  await session('meigen_sk_test',()=>Response.json({success:false,code:'insufficient_credits',available:0},{status:402}),async(client,requests)=>{
+    const result=await call(client,'upload_skill_image',{purpose:'upscale',imageBase64:'AAAA'})
+    assert.equal(result.structuredContent.nextAction.type,'top_up')
+    assert.match(result.structuredContent.nextAction.message,/retry the same upload/)
+    assert.equal(requests.length,1)
+  })
+})
+
+test('an accepted Skill with unavailable records stops polling without replacing the job', async () => {
+  await session('meigen_sk_test',()=>Response.json({success:false,code:'generation_unavailable',status:'failed',retryable:false},{status:410}),async(client,requests)=>{
+    const result=await call(client,'check_skill',{skill:'upscale',requestId})
+    assert.equal(result.structuredContent.nextAction.type,'review_missing')
+    assert.equal(result.structuredContent.nextAction.tool,undefined)
+    assert.match(result.structuredContent.nextAction.message,/do not resubmit/)
+    assert.equal(requests.length,1)
+  })
+})
+
+test('published Skill schemas distinguish poster constraints, style precedence and reference-image roles', async () => {
+  await session(undefined, undefined, async client => {
+    const { tools } = await client.listTools()
+    const poster = tools.find(tool => tool.name === 'generate_marketing_poster').inputSchema
+    const detail = tools.find(tool => tool.name === 'generate_product_detail_images').inputSchema
+    assert.match(poster.properties.content.description, /exact visible wording.*style, layout and design directions in extraNotes or customStyle/)
+    assert.match(poster.properties.extraNotes.description, /verified facts.*requested display copy.*layout.*not text to print verbatim/)
+    assert.match(poster.properties.styleId.description, /ID, not.*display label.*Auto/)
+    assert.match(poster.properties.customStyle.description, /overrides styleId.*styleImage/)
+    assert.match(poster.properties.styleImage.description, /PRIMARY.*Do not copy.*products, text or layout/)
+    assert.match(poster.properties.logo.description, /exact brand logo/)
+    assert.match(poster.properties.productImages.description, /up to three.*not its visual style/)
+    assert.match(detail.properties.productImage.description, /main product photo/)
+    assert.match(detail.properties.modelImage.description, /person.*hero and scene.*Not an image-generation model/)
+    assert.match(detail.properties.extraProductImages.description, /up to two/)
+    assert.match(poster.properties.quality.description, /not output resolution.*list_skills.*no fixed completion time/)
+    assert.equal(poster.properties.extraNotes.maxLength, 500)
+    assert.equal(poster.properties.resolution, undefined)
+    assert(!poster.required.includes('logo') && !poster.required.includes('productImages') && !poster.required.includes('styleId'))
+  })
+})
+
+test('published bilingual README and API-guide MCP examples validate and call the dedicated endpoint unchanged', async () => {
+  const { readFile } = await import('node:fs/promises')
+  for (const file of ['README.md', 'README.zh-CN.md', 'SKILLS_API.md']) {
+    const source = await readFile(new URL(`../../${file}`, import.meta.url), 'utf8')
+    const examples = [...source.matchAll(/```json\s*\n([\s\S]*?)```/g)]
+      .map(([, json]) => { try { return JSON.parse(json) } catch { return null } })
+      .filter(value => value?.name === 'generate_marketing_poster')
+    assert.equal(examples.length, 1, file)
+    await session('meigen_sk_test', () => Response.json({ success: true, generationId: 'documented-poster-job' }), async (client, requests) => {
+      const example = examples[0]
+      const result = await client.callTool(example)
+      assert.equal(result.isError, undefined, JSON.stringify(result))
+      assert.equal(requests.length, 1)
+      assert.match(requests[0].url, /\/api\/skills\/brand-poster\/run$/)
+      assert.deepEqual(requests[0].body, example.arguments)
+      assert.equal(example.arguments.autoCopy, false)
+      assert.equal(example.arguments.styleId, 'minimalist')
+      assert.ok(example.arguments.extraNotes)
+      assert.equal(result.structuredContent.generationId, 'documented-poster-job')
+    })
+  }
+})

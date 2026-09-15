@@ -6,8 +6,6 @@
  */
 
 import { z } from 'zod'
-import { existsSync } from 'fs'
-import { homedir } from 'os'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'
 import type { ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js'
@@ -20,19 +18,20 @@ import {
   loadWorkflow,
   listWorkflows,
 } from '../lib/providers/comfyui.js'
-import { sharedApiSemaphore, classifyError } from '../lib/generation-shared.js'
+import { classifyError } from '../lib/generation-shared.js'
 import { Semaphore } from '../lib/semaphore.js'
 import { saveImageLocally } from '../lib/save-image.js'
 import { addRecentGeneration } from '../lib/preferences.js'
-import { processAndUploadImage } from '../lib/upload.js'
-import { unsafeReferenceUrlReason } from '../lib/url-safety.js'
+import { generationControls, generationOutputSchema, generationResult, errorOutput, GenerationError } from '../lib/generation-contract.js'
+import { runMeiGenGeneration } from '../lib/generation-operation.js'
+import { fingerprintReferences, uploadReferences } from '../lib/generation-references.js'
 
 // MCP 不再硬编码 MeiGen 默认模型。
 // 用户不传 model 时,MeiGen 后端会按 DB is_default=true 的行决定,
 // 响应里回传实际使用的 modelId,MCP 据此展示给用户。
 // 好处: 后端切默认(比如 gpt-image-2 维护/恢复)不需要发 npm 版本。
 
-// API semaphore: shared with generate_video (same backend endpoint, same 12/min rate limit).
+// MeiGen submissions share four slots with video; polling and download release them.
 // ComfyUI: serial (local GPU constraint).
 const comfyuiSemaphore = new Semaphore(1)
 
@@ -48,57 +47,12 @@ async function notify(extra: RequestHandlerExtra<ServerRequest, ServerNotificati
   }
 }
 
-/** Check if a string looks like a local file path (not a URL) */
-function isLocalPath(ref: string): boolean {
-  if (ref.startsWith('http://') || ref.startsWith('https://')) return false
-  if (ref.startsWith('file://')) return true
-  return ref.startsWith('/') || ref.startsWith('~') || /^[A-Z]:[/\\]/i.test(ref)
-}
-
-/** Resolve file:// URIs and ~ prefix to absolute paths */
-function resolveLocalPath(ref: string): string {
-  if (ref.startsWith('file://')) return ref.slice(7)
-  if (ref.startsWith('~')) return homedir() + ref.slice(1)
-  return ref
-}
-
-/**
- * Resolve local file paths in referenceImages to public URLs by uploading them.
- * URLs are passed through unchanged. ComfyUI is skipped (handles local files natively).
- */
-async function resolveReferenceImages(
-  refs: string[] | undefined,
-  config: MeiGenConfig,
-  notifyFn: (msg: string) => Promise<void>,
-): Promise<string[] | undefined> {
-  if (!refs || refs.length === 0) return refs
-
-  return Promise.all(refs.map(async (ref) => {
-    if (!isLocalPath(ref)) {
-      // Defense-in-depth: reject obviously-unsafe URLs (file://, data:, private IPs,
-      // cloud metadata) before relaying to the backend. Backend SHOULD also filter
-      // but this saves a network round-trip and gives users a clearer error.
-      const unsafe = unsafeReferenceUrlReason(ref)
-      if (unsafe) {
-        throw new Error(`Reference image URL rejected: ${unsafe}. URL: ${ref}`)
-      }
-      return ref
-    }
-
-    const filePath = resolveLocalPath(ref)
-    if (!existsSync(filePath)) {
-      throw new Error(`Reference image not found: ${filePath}`)
-    }
-
-    await notifyFn(`Uploading reference image: ${filePath}...`)
-    const result = await processAndUploadImage(filePath, config)
-    return result.publicUrl
-  }))
-}
-
 export const generateImageSchema = {
+  ...generationControls,
   prompt: z.string().trim().min(1, 'Prompt cannot be empty').describe('The image generation prompt'),
-  model: z.string().optional()
+  modelId: z.string().trim().min(1).optional().describe('Alias of model for portable workflow calls. If both are present they must match.'),
+  modelVariant: z.string().optional().describe('Optional model variant from live list_models, such as a supported GPT Image 2.5 variant. Forwarded unchanged to MeiGen.'),
+  model: z.string().trim().min(1).optional()
     .describe('Model name. For OpenAI-compatible providers: any model ID your endpoint supports. For MeiGen: use model IDs from list_models (e.g. "gpt-image-2", "grok-image" = xAI Grok Imagine Quality, 1K/2K, supports image-to-image, "nanobanana-2", "seedream-4.5", "flux2-klein").'),
   size: z.string().optional()
     .describe('Image size for OpenAI-compatible providers: "1024x1024", "1536x1024", "auto". MeiGen/ComfyUI: use aspectRatio instead.'),
@@ -109,7 +63,7 @@ export const generateImageSchema = {
   quality: z.string().optional()
     .describe('Image quality. MeiGen gpt-image-2: "low" / "medium" / "high". OpenAI-compatible providers also accept "high".'),
   referenceImages: z.array(z.string()).optional()
-    .describe('Image references for style/content guidance. Accepts both public URLs (http/https) and local file paths. Local files are automatically compressed and uploaded when needed. For ComfyUI: local files are passed directly to the workflow (requires LoadImage node). Sources: gallery URLs from search_gallery/get_inspiration, URLs from previous generate_image results, or local file paths.'),
+    .describe('Image references for style/content guidance. Accepts direct public HTTPS URLs without credentials/fragments or accessible absolute local paths. Relative paths are rejected. Local PNG/JPEG/WebP/GIF references up to 32 MiB and 64 million pixels are fully decoded, stripped of metadata and prepared up to 4096px, preserving transparency. For ComfyUI: local files are passed directly to the workflow (requires LoadImage node). Sources: gallery URLs from search_gallery/get_inspiration, URLs from previous generate_image results, or local file paths.'),
   provider: z.enum(['openai', 'meigen', 'comfyui']).optional()
     .describe('Which provider to use. Auto-detected from configuration if not specified.'),
   workflow: z.string().optional()
@@ -119,89 +73,47 @@ export const generateImageSchema = {
 }
 
 export function registerGenerateImage(server: McpServer, apiClient: MeiGenApiClient, config: MeiGenConfig) {
-  server.tool(
-    'generate_image',
+  server.registerTool(
+    'generate_image', { description:
     'Generate an image using AI. Supports MeiGen platform, local ComfyUI, or OpenAI-compatible APIs. Tip: get prompts from get_inspiration() or enhance_prompt(), and use gallery image URLs as referenceImages for style guidance. For Midjourney V8.1, an optional style reference can be passed by appending `--sref <code>` at the end of the prompt — only when the user provides a Midjourney style code (numeric or text). Do NOT pass URLs or local paths via --sref; for any image-based reference, use the referenceImages parameter instead.',
-    generateImageSchema,
-    { readOnlyHint: false, destructiveHint: true },
-    async ({ prompt, model, size, aspectRatio, resolution, quality, referenceImages, provider: requestedProvider, workflow, negativePrompt }, extra) => {
+    inputSchema: generateImageSchema, outputSchema: generationOutputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true } },
+    async ({ prompt, model, modelId, modelVariant, size, aspectRatio, resolution, quality, referenceImages, provider: requestedProvider, workflow, negativePrompt, requestId, wait = true, download = true }, extra) => {
+      if (model && modelId && model !== modelId) return generationResult(errorOutput(new GenerationError('model and modelId must match when both are provided.', 'model_alias_conflict')))
+      model = model ?? modelId
       const availableProviders = getAvailableProviders(config)
 
-      if (availableProviders.length === 0) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: 'No image generation providers configured. Get a MeiGen API token at https://www.meigen.ai (sign in → Settings → API Keys), then set MEIGEN_API_TOKEN in your environment or MCP config and restart the host. Claude Code users can run /meigen:setup for guided configuration. Alternative providers: OPENAI_API_KEY (any OpenAI-compatible API) or ComfyUI workflow import.',
-          }],
-          isError: true,
-        }
-      }
+      if (availableProviders.length === 0) return generationResult(errorOutput(new GenerationError('No generation provider configured. Set MEIGEN_API_TOKEN or your selected provider key privately in MCP configuration.', 'authentication_required', 401)))
 
       // Determine which provider to use
       let providerType: ProviderType
       if (requestedProvider) {
-        if (!availableProviders.includes(requestedProvider)) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `Provider "${requestedProvider}" is not configured. Available: ${availableProviders.join(', ')}`,
-            }],
-            isError: true,
-          }
-        }
+        if (!availableProviders.includes(requestedProvider)) return generationResult(errorOutput(new GenerationError(`Provider "${requestedProvider}" is not configured. Available: ${availableProviders.join(', ')}`, 'provider_unavailable')))
+
         providerType = requestedProvider
       } else {
         providerType = getDefaultProvider(config)!
       }
 
       try {
-        // Auto-upload local reference images for API providers (ComfyUI handles local files natively)
-        const resolvedRefs = providerType !== 'comfyui'
-          ? await resolveReferenceImages(referenceImages, config, (msg) => notify(extra, msg))
-          : referenceImages
-
-        switch (providerType) {
-          case 'openai': {
-            await sharedApiSemaphore.acquire()
-            try {
-              return await generateWithOpenAI(config, prompt, model, size, quality, resolvedRefs)
-            } finally {
-              sharedApiSemaphore.release()
-            }
-          }
-          case 'meigen': {
-            await sharedApiSemaphore.acquire()
-            try {
-              return await generateWithMeiGen(apiClient, prompt, model, aspectRatio, resolution, quality, resolvedRefs, extra)
-            } finally {
-              sharedApiSemaphore.release()
-            }
-          }
-          case 'comfyui': {
-            await comfyuiSemaphore.acquire()
-            try {
-              return await generateWithComfyUI(config, prompt, workflow, referenceImages, extra)
-            } finally {
-              comfyuiSemaphore.release()
-            }
-          }
-          default:
-            return {
-              content: [{ type: 'text' as const, text: `Unknown provider: ${providerType}` }],
-              isError: true,
-            }
+        if (providerType === 'meigen') {
+          return generationResult(await runMeiGenGeneration('image', { prompt, modelId: model, modelVariant, aspectRatio, resolution, quality, referenceImages, requestId, wait, download }, apiClient, config, extra.signal, message => notify(extra, message)))
         }
+        // These synchronous providers have no MeiGen job identity; reject unsupported orchestration before upload/API I/O.
+        if (!wait || requestId) throw new GenerationError('requestId and wait=false are supported only by provider=meigen. This provider has no resumable MeiGen generation ID.', 'unsupported_execution_mode')
+        const resolvedRefs = providerType === 'comfyui' ? referenceImages : await uploadReferences(await fingerprintReferences(referenceImages ?? [], extra.signal), config, extra.signal)
+        if (providerType === 'openai') {
+          return await generateWithOpenAI(config, prompt, model, size, quality, resolvedRefs, download, extra.signal)
+        }
+        await comfyuiSemaphore.acquire(extra.signal)
+        try { return await generateWithComfyUI(config, prompt, workflow, referenceImages, extra, download) }
+        finally { comfyuiSemaphore.release() }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        const guidance = classifyError(message)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Image generation failed: ${message}\n\n${guidance}`,
-          }],
-          isError: true,
-        }
+        const result = errorOutput(error, { provider: providerType })
+        if (result.error) result.error.message += ` ${classifyError(result.error.message, providerType)}`
+        return generationResult(result)
       }
+
     }
   )
 }
@@ -217,147 +129,19 @@ async function generateWithOpenAI(
   size?: string,
   quality?: string,
   referenceImages?: string[],
+  download = true,
+  signal?: AbortSignal,
 ) {
   const provider = new OpenAIProvider(config.openaiApiKey!, config.openaiBaseUrl, config.openaiModel)
-  const result = await provider.generate({ prompt, model, size, quality, referenceImages })
+  const result = await provider.generate({ prompt, model, size, quality, referenceImages, signal, download })
 
-  const savedPath = saveImageLocally(result.imageBase64, result.mimeType)
+  const savedPath = download ? saveImageLocally(result.imageBase64, result.mimeType) : undefined
 
   addRecentGeneration({ prompt, provider: 'openai', model: model || config.openaiModel })
 
-  const lines = [`Image generated successfully.`]
-  lines.push(`- Provider: OpenAI-compatible (${model || config.openaiModel})`)
-  if (referenceImages?.length) lines.push(`- Reference images: ${referenceImages.length} used`)
-  if (savedPath) lines.push(`- Saved to: ${savedPath}`)
+  const response = generationResult({ success: true, status: 'completed', provider: 'openai', mediaType: 'image', modelId: model || config.openaiModel, urls: result.imageUrl ? [result.imageUrl] : [], ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}), ...(savedPath ? { savedPath } : {}) })
+  return { ...response, ...(!savedPath && result.imageBase64 ? { content: [...response.content, { type: 'image' as const, data: result.imageBase64, mimeType: result.mimeType }] } : {}) }
 
-  return {
-    content: [{ type: 'text' as const, text: lines.join('\n') }],
-  }
-}
-
-async function generateWithMeiGen(
-  apiClient: MeiGenApiClient,
-  prompt: string,
-  model: string | undefined,
-  aspectRatio: string | undefined,
-  resolution: string | undefined,
-  quality: string | undefined,
-  referenceImages: string[] | undefined,
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
-) {
-  // 1. Submit generation request
-  // model / resolution / quality 不强制填充默认值;缺省时由 MeiGen 后端按 DB 决定
-  const genResponse = await apiClient.generateImage({
-    prompt,
-    modelId: model,
-    aspectRatio: aspectRatio || 'auto',
-    resolution,
-    quality,
-    referenceImages,
-  })
-
-  if (!genResponse.generationId) {
-    throw new Error('No generation ID returned')
-  }
-
-  // Notify: generation submitted
-  await notify(extra, 'Image generation submitted, waiting for result...')
-
-  // 2. Poll until completed (with progress notifications)
-  let status
-  try {
-    status = await apiClient.waitForGeneration(
-      genResponse.generationId,
-      undefined, // 服务端 pollHintSeconds 驱动;本地仅安全阀(POLL_SAFETY_VALVE_MS)
-      async (elapsedMs) => {
-        await notify(extra, `Still generating... (${Math.round(elapsedMs / 1000)}s elapsed)`)
-      },
-    )
-  } catch (pollError) {
-    // 任务已创建且已扣点:挂起幂等尝试(同参数重试直接续查同一任务,不再提交扣费,
-    // 十一审),并带 generationId 返回 —— 报裸错会诱导重试双扣
-    apiClient.suspendAttemptFor(genResponse._attempt, genResponse.generationId!)
-    const msg = pollError instanceof Error ? pollError.message : String(pollError)
-    throw new Error(
-      `${msg}\n\nGeneration ID: ${genResponse.generationId}. The job may still complete in the background — ` +
-        'check https://www.meigen.ai or use check_generation before retrying. If it ultimately fails, credits auto-refund.'
-    )
-  }
-
-
-  if (status.status === 'failed') {
-    // 明确失败(服务端已退款):尝试终结,「再来一张」应是新单
-    apiClient.ackAttempt(genResponse._attempt)
-    throw new Error(status.error || 'Generation failed')
-  }
-
-  // 视频模型误用:任务已完成已扣费,返回**成功**(视频 URL + ID),绝不抛错 ——
-  // 抛错并提示"改用 generate_video"会诱导再次提交双扣(九审 P1)
-  if (status.mediaType === 'video' && status.videoUrl) {
-    apiClient.ackAttempt(genResponse._attempt)
-    return {
-      content: [{
-        type: 'text' as const,
-        text: [
-          'This model produced a VIDEO (you were charged once — do NOT re-submit).',
-          `Video URL: ${status.videoUrl}`,
-          `Generation ID: ${genResponse.generationId}`,
-          'Next time use the generate_video tool for this model.',
-        ].join('\n'),
-      }],
-    }
-  }
-
-  // Use imageUrls array if available (e.g., V8.1 returns 4 candidates), fall back to imageUrl
-  const allImageUrls = status.imageUrls?.length ? status.imageUrls : (status.imageUrl ? [status.imageUrl] : [])
-
-  if (allImageUrls.length === 0) {
-    // 任务已完成且已扣点,URL 缺失是响应异常:挂起尝试(重试续查同任务而非新单,
-    // 十二审 P1)并带 ID 抛出,裸错会诱导重试双扣
-    apiClient.suspendAttemptFor(genResponse._attempt, genResponse.generationId!)
-    throw new Error(`Generation ${genResponse.generationId} completed but the response is missing the image URL — check https://www.meigen.ai gallery or use check_generation; do NOT re-submit (it would charge again).`)
-  }
-  // URL 已确认交付:尝试终结,「再来一张」应是新单(十二审 P1:ack 必须在交付确认后)
-  apiClient.ackAttempt(genResponse._attempt)
-
-  // Download first image for local save。下载失败**降级为成功返回远程 URL**:
-  // 任务已完成已扣点,本地保存只是增值步骤,失败不能变成"生成失败"诱导重试双扣(七审 P1)
-  let savedPath: string | null = null
-  let downloadNote: string | null = null
-  try {
-    const imageRes = await fetch(allImageUrls[0])
-    if (!imageRes.ok) throw new Error(`download ${imageRes.status}`)
-    const buffer = await imageRes.arrayBuffer()
-    const base64 = Buffer.from(buffer).toString('base64')
-    const mimeType = imageRes.headers.get('content-type') || 'image/jpeg'
-    savedPath = saveImageLocally(base64, mimeType) ?? null
-  } catch (downloadError) {
-    downloadNote = `Local save skipped (${downloadError instanceof Error ? downloadError.message : String(downloadError)}) — use the Image URL directly.`
-  }
-
-  // 优先用后端返回的 modelId(反映真实使用的模型,包含 is_default 解析结果);
-  // 若后端未回传(旧版 backend),用用户显式传入的 model,再 fallback 到占位
-  const actualModel = genResponse.modelId || model || 'meigen-default'
-
-  addRecentGeneration({ prompt, provider: 'meigen', model: actualModel, aspectRatio })
-
-  const lines = [`Image generated successfully.`]
-  lines.push(`- Provider: MeiGen (model: ${actualModel})`)
-
-  if (allImageUrls.length > 1) {
-    lines.push(`- ${allImageUrls.length} candidate images returned:`)
-    allImageUrls.forEach((url, i) => lines.push(`  ${i + 1}. ${url}`))
-  } else {
-    lines.push(`- Image URL: ${allImageUrls[0]}`)
-  }
-
-  if (savedPath) lines.push(`- Saved to: ${savedPath}`)
-  if (downloadNote) lines.push(`- ${downloadNote}`)
-  lines.push(`\nYou can use any Image URL as referenceImages for follow-up generation.`)
-
-  return {
-    content: [{ type: 'text' as const, text: lines.join('\n') }],
-  }
 }
 
 async function generateWithComfyUI(
@@ -366,6 +150,7 @@ async function generateWithComfyUI(
   workflow: string | undefined,
   referenceImages: string[] | undefined,
   extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  download = true,
 ) {
   // Determine workflow
   const workflows = listWorkflows()
@@ -380,7 +165,7 @@ async function generateWithComfyUI(
   const provider = new ComfyUIProvider(comfyuiUrl)
 
   // Pre-flight: check if ComfyUI is reachable
-  const health = await provider.checkConnection()
+  const health = await provider.checkConnection(extra.signal)
   if (!health.ok) {
     throw new Error(`ComfyUI is not reachable at ${comfyuiUrl}. Make sure ComfyUI is running.\nDetails: ${health.error}`)
   }
@@ -390,23 +175,16 @@ async function generateWithComfyUI(
   const result = await provider.generate(
     workflowData,
     prompt,
-    { referenceImages },
+    { referenceImages, signal: extra.signal, download },
     async (elapsedMs) => {
       await notify(extra, `Still generating... (${Math.round(elapsedMs / 1000)}s elapsed)`)
     },
   )
 
-  const savedPath = saveImageLocally(result.imageBase64, result.mimeType)
+  const savedPath = download ? saveImageLocally(result.imageBase64, result.mimeType) : undefined
 
   addRecentGeneration({ prompt, provider: 'comfyui', model: workflowName })
 
-  const lines = [`Image generated successfully.`]
-  lines.push(`- Provider: ComfyUI (workflow: ${workflowName})`)
-  if (savedPath) lines.push(`- Saved to: ${savedPath}`)
-  if (result.referenceImageWarning) lines.push(`\nWarning: ${result.referenceImageWarning}`)
-
-  return {
-    content: [{ type: 'text' as const, text: lines.join('\n') }],
-  }
+  const response = generationResult({ success: true, status: 'completed', provider: 'comfyui', mediaType: 'image', modelId: workflowName, urls: result.imageUrl ? [result.imageUrl] : [], ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}), ...(savedPath ? { savedPath } : {}), ...(result.referenceImageWarning ? { nextAction: { type: 'use_result', message: result.referenceImageWarning } } : {}) })
+  return { ...response, ...(!savedPath && result.imageBase64 ? { content: [...response.content, { type: 'image' as const, data: result.imageBase64, mimeType: result.mimeType }] } : {}) }
 }
-

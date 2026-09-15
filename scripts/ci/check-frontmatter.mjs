@@ -2,7 +2,7 @@
 /**
  * Lint frontmatter on agents/commands/skills.
  *
- * Rules (per CLAUDE.md):
+ * Repository frontmatter conventions:
  *  - Agents (plugin/agents/*.md): MUST have description; MUST NOT have `name:` (derived from filename).
  *  - Commands (plugin/commands/*.md): MUST have description; MUST NOT have `name:` (derived from filename).
  *  - Skills (plugin/skills/.../SKILL.md, openclaw/SKILL.md): MUST have name + description + version.

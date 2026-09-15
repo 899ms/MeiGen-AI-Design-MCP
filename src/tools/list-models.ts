@@ -5,7 +5,7 @@
 
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import type { MeiGenApiClient } from '../lib/meigen-api.js'
+import type { MeiGenApiClient, MeiGenModel } from '../lib/meigen-api.js'
 import { minimumVideoCredits, videoCapabilitiesForModel } from '../lib/video-capabilities.js'
 import type { MeiGenConfig } from '../config.js'
 import { getAvailableProviders } from '../config.js'
@@ -22,20 +22,24 @@ export const listModelsSchema = {
 }
 
 export function registerListModels(server: McpServer, apiClient: MeiGenApiClient, config: MeiGenConfig) {
-  server.tool(
-    'list_models',
+  server.registerTool(
+    'list_models', { description:
     'List available AI image generation models and their capabilities. For up-to-date pricing, see https://www.meigen.ai/model-comparison.',
-    listModelsSchema,
-    { readOnlyHint: true },
-    async ({ activeOnly }) => {
+    inputSchema: listModelsSchema,
+    outputSchema: { success: z.boolean(), models: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()), configuredProviders: z.array(z.enum(['meigen','openai','comfyui'])), executionCapabilities: z.object({ submitOnly: z.boolean(), download: z.boolean(), maxConcurrentSubmissions: z.number(), concurrency: z.string() }), error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).optional() },
+    annotations: { readOnlyHint: true } },
+    async ({ activeOnly }, extra) => {
       const providers = getAvailableProviders(config)
       const sections: string[] = []
+      let models: MeiGenModel[] = []
+      let modelError: { code: string; message: string; retryable: boolean } | undefined
 
       // MeiGen platform models
       try {
-        const allModels = await apiClient.listModels(activeOnly)
+        const allModels = await apiClient.listModels(activeOnly, extra.signal)
         // 过滤 hidden 模型(老版 V7 / Niji 7 / Seedance Pro 旧 row 等只为兼容老 MCP modelId 调用,不应在 list 里推荐)
         const visible = allModels.filter(m => m.extra_config?.hidden !== true)
+        models = visible
 
         const imageModels = visible.filter(m => (m.media_type ?? 'image') === 'image')
         const videoModels = visible.filter(m => m.media_type === 'video')
@@ -135,7 +139,7 @@ export function registerListModels(server: McpServer, apiClient: MeiGenApiClient
         if (imageModels.length > 0) {
           sections.push(
             `## MeiGen Platform — Image Models${providers.includes('meigen') ? '' : ' (requires MEIGEN_API_TOKEN)'}\n\n` +
-            `When generating, do NOT specify model unless the user explicitly asks for one.\n` +
+            `Preserve an explicitly selected model from the caller or workflow; otherwise the server selects its default.\n` +
             `The server uses the platform default automatically.\n` +
             `Pricing varies by model and changes over time — see https://www.meigen.ai/model-comparison\n\n` +
             imageModels.map(renderImage).join('\n\n')
@@ -153,7 +157,8 @@ export function registerListModels(server: McpServer, apiClient: MeiGenApiClient
         if (imageModels.length === 0 && videoModels.length === 0) {
           sections.push('## MeiGen Platform Models\n\nNo models available.')
         }
-      } catch {
+      } catch (error) {
+        modelError = { code: 'models_unavailable', message: error instanceof Error ? error.message : 'Unable to fetch MeiGen models', retryable: true }
         sections.push('## MeiGen Platform Models\n\nUnable to fetch models from MeiGen API.')
       }
 
@@ -217,8 +222,11 @@ export function registerListModels(server: McpServer, apiClient: MeiGenApiClient
         ? `\nConfigured providers: ${providers.join(', ')}`
         : '\nNo image generation providers configured. On Claude Code, run /meigen:setup. On other hosts, set MEIGEN_API_TOKEN / OPENAI_API_KEY in your MCP config env block, or import a ComfyUI workflow.'
 
+      const structuredContent = { success: !modelError, models, configuredProviders: providers, executionCapabilities: { submitOnly: true, download: true, maxConcurrentSubmissions: 4, concurrency: 'MeiGen: at most four in-flight submissions per MCP process. Polling and downloads do not occupy submission slots. This is not an account-wide limit or requests-per-minute quota; honor the backend Retry-After.' }, ...(modelError ? { error: modelError } : {}) }
       return {
-        content: [{
+        structuredContent,
+        ...(modelError ? { isError: true } : {}),
+        content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }, {
           type: 'text' as const,
           text: sections.join('\n\n') + configStatus,
         }],

@@ -50,18 +50,30 @@ When a decision becomes obsolete (the constraint disappears, the data flips), mo
 **How to apply**: When documenting Midjourney, refer only to V8.1. The `style: 'anime'` mode in `enhance_prompt` injects anime trigger words; that is the path for stylized output, not a model switch.
 
 ### Backend `mediaType` is the source of truth for image vs. video output
-**Decision**: `generate_image` rejects responses where `status.mediaType === 'video'`; `generate_video` rejects anything that isn't `'video'`. Removed the legacy `videoUrl || status.imageUrl` fallback in 1.3.0.
+**Decision**: Preserve a completed job's actual `mediaType`, URLs and success state. Keep the tool's original intent as `requestedMediaType`; when the two differ, return `nextAction: review_media_type` instead of automatically advancing or submitting another job. Local filenames use the actual media type.
 
-**Why**: A video-model id passed to `generate_image` (or vice versa) used to silently write a `.jpg` as `.mp4` (or treat a video URL as an image). The fallback was a footgun — better to fail loudly with a helpful redirect ("use generate_video for this model id").
+**Why**: A media mismatch may already have incurred a charge. The 1.4.0 tools returned the existing result with a warning; the initial 2.0.0 refactor lost that warning. Treating the artifact as failed or silently starting a replacement would lose paid work or create another charge. A warning after completion is not a pre-charge model validation guarantee.
 
-**How to apply**: New media types in the future should add their own dedicated tool + `mediaType` guard, not extend the fallback chain.
+**How to apply**: Preserve intent independently of the initial submission response, which may already report a different actual media type. Test both directions, terminal dedupe and recovery. Missing URLs and provider failures keep their own recovery/error actions.
 
-### Reference image uploads expire after 24h (R2 contract)
-**Decision**: All local reference images uploaded to `gen.meigen.ai` are pruned by R2 after 24 hours. This is mentioned in tool responses and the README.
+### Observation retries never repeat a paid submission
+**Decision**: Local MeiGen waiting retries transient status-query errors only, stopping after three consecutive errors. A valid status resets that counter. Use increasing delays, honor a larger `Retry-After`, and include queries/backoff in the overall observation deadline. Caller cancellation and terminal errors stop immediately.
 
-**Why**: R2 is a cache, not durable storage. Users sometimes save tool responses and try to reuse the URL days later — failure mode was confusing 404s.
+**Why**: A temporary gateway failure is not evidence that the paid generation failed. On observation interruption preserve `requestId`/`generationId` and return a recovery action. Neither a deadline nor a cancellation proves server-side cancellation or refund.
 
-**How to apply**: Don't hand a reference URL back to the user as if it were durable. If we ever need persistence, that's a different storage tier and a real product decision.
+### A missing recovery endpoint is not a missing request
+**Decision**: Only the authenticated recovery endpoint's JSON `success: false`, `code: request_not_found` with HTTP 404 allows same-ID submission recovery. An HTML or unrecognized JSON 404 returns `endpoint_unavailable` / `check_backend`; it never permits an automatic paid POST.
+
+**Why**: A missing route after deployment/rollback says nothing about an existing charged job. Deploy the compatible backend before distributing npm 2.0.0 and preserve recovery routes when rolling back. Existing compatible POST idempotency can prevent duplicate charges, but an arbitrary 404 is not proof of that backend guarantee.
+
+**How to apply**: Keep IDs and exact inputs while the operator verifies the configured API URL and restores the compatible endpoint. Known `generationId` status can still use the existing status route. Do not require withdrawal of packages already installed by users.
+
+### Reference uploads have no promised archival lifetime
+**Decision**: Do not promise either deletion after 24 hours or permanent retention. Reference URLs may remain available, but the API does not guarantee their storage lifetime.
+
+**Why**: The uploads prefix has no verified 24-hour cleanup contract. A stated expiry must come from a verified lifecycle rule, not an assumption.
+
+**How to apply**: Preserve accepted URLs for retries, retain original files, and download outputs that need to be kept. If a source becomes unavailable, recover any accepted job before considering a new attempt.
 
 ### File magic-byte validation on uploads
 **Decision**: `processAndUploadImage` validates file headers (JPEG / PNG / WebP / GIF signatures) before compression and upload, not just file extension.

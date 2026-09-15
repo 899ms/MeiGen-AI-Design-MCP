@@ -1,7 +1,7 @@
 {
   "name": "meigen",
-  "version": "1.4.0",
-  "description": "Visual creative expert plugin — search inspiration, enhance prompts, and generate AI images with intelligent workflow orchestration",
+  "version": "2.0.0",
+  "description": "Composable image and video generation tools, reusable visual skills, and optional creative workflows for MCP clients",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -11,13 +11,21 @@
   "files": [
     "bin/",
     "dist/",
-    "data/"
+    "data/",
+    "SKILLS_API.md",
+    "COMPOSABLE_WORKFLOWS.md",
+    "COMPOSABLE_WORKFLOWS.zh-CN.md"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/lib/*.test.mjs && node --import tsx --test src/tools/*.test.mjs"
+    "test": "node --test src/lib/*.test.mjs && node --import tsx --test src/tools/*.test.mjs && node --test scripts/ci/release.test.mjs",
+    "prepack": "pnpm run build",
+    "release:check": "node scripts/release.mjs check",
+    "release:dry-run": "node scripts/release.mjs dry-run",
+    "release:publish": "node scripts/release.mjs publish",
+    "release:stage": "node scripts/release.mjs stage"
   },
   "keywords": [
     "mcp",
@@ -42,6 +50,9 @@
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "volta": {
+    "node": "24.19.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

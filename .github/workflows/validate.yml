@@ -33,21 +33,36 @@ jobs:
         run: node scripts/ci/check-frontmatter.mjs
 
   typecheck-and-build:
-    name: TypeScript typecheck + clean build
-    runs-on: ubuntu-latest
+    name: TypeScript, tests + clean build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install deps
-        run: npm ci || npm install
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install locked deps
+        run: |
+          pnpm import
+          pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test
 
       # Clean build catches stale dist files that tsc --noEmit can't detect
       # (e.g., a deleted source file whose dist artifact lingers in the repo).
@@ -55,7 +70,7 @@ jobs:
       - name: Clean build
         run: |
           rm -rf dist
-          npm run build
+          pnpm build
           test -f dist/index.js
           test -f dist/cli/init.js
           test -f dist/cli/gen.js

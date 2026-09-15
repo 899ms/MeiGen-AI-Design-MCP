@@ -18,7 +18,7 @@ const newKey = () => `key-${++n}`;
 function captureHandler(status) {
   let handler;
   const server = {
-    tool: (..._args) => {
+    registerTool: (..._args) => {
       handler = _args[_args.length - 1];
     },
   };
@@ -84,7 +84,7 @@ test('processing:不触碰尝试状态', async () => {
 test('状态查询抛错:isError 且尝试保留', async () => {
   const sig = suspendedAttempt('gen-6');
   let handler;
-  const server = { tool: (..._args) => { handler = _args[_args.length - 1]; } };
+  const server = { registerTool: (..._args) => { handler = _args[_args.length - 1]; } };
   const client = { getGenerationStatus: async () => { throw new Error('network down'); } };
   registerCheckGeneration(server, client);
   const res = await handler({ generationId: 'gen-6' });

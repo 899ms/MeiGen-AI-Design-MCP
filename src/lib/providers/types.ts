@@ -4,6 +4,8 @@
  */
 
 export interface ImageGenerationRequest {
+  signal?: AbortSignal
+  download?: boolean
   prompt: string
   model?: string
   size?: string          // "1024x1024", "1536x1024", "auto"
@@ -14,6 +16,7 @@ export interface ImageGenerationRequest {
 }
 
 export interface ImageGenerationResult {
+  imageUrl?: string
   imageBase64: string
   mimeType: string
 }

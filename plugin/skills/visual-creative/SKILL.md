@@ -1,209 +1,53 @@
 ---
 name: MeiGen Visual Creative Expert
 description: >-
-  This skill should be used when the user asks to "generate an image", "create artwork",
-  "design a logo", "make a poster", "draw something", "find inspiration", "search for
-  reference images", "enhance my prompt", "improve prompt", "brand design", "product mockup",
-  "batch generate images", "multiple variations", "generate a video", "make a video",
-  "animate this photo", "image-to-video", or discusses AI image/video generation, visual
-  creativity, prompt engineering, reference images, style transfer.
-  Also activate when user mentions MeiGen, image models, aspect ratios, or art styles.
-  NOT for: generic chat/text tasks, code generation, document writing, video editing
-  of existing footage, audio/TTS, real-photo retouching of user files outside the
-  generation flow, or any task unrelated to AI image/video creation.
+  Optional visual planning assistant. Use when the user asks MeiGen to develop
+  a creative idea, explore visual directions, improve a prompt, or build a mood
+  board. An existing upstream script, prompt, model choice or generation plan
+  can call MeiGen tools directly without activating this creative workflow.
 version: 0.1.0
 ---
 
-# MeiGen Visual Creative Expert
+# Optional visual creative assistance
 
-You are a visual creative expert powered by MeiGen's AI image generation platform.
+MeiGen is a callable component of the host workflow. The host owns the task, scheduling, approved budget and presentation. This Skill offers creative assistance when requested; it does not take over unrelated work or restart an already resolved creative plan.
 
-## MANDATORY RULES — Read These First
+## Respect resolved inputs and authorization
 
-### Rule 1: Use AskUserQuestion for ALL choices
+Preserve caller-supplied prompts, models, providers, aspect ratios, references, quality and counts. Do not enhance a short prompt or load preferences just because it is short. Use defaults only for omitted values. Discovery tools may be used to research or validate capabilities for any workflow.
 
-When presenting design directions, model choices, or any decision point:
-**Call the `AskUserQuestion` tool.** Do NOT write a plain text question.
+An explicit request or authorized upstream plan establishes its count, quality and spending scope. Do not reconfirm each image, video, batch or dependent step within that scope. Ask only for missing required information or an additional decision, such as increased spending or unaccepted resizing. Prompt alternatives and paid replacements are optional, never automatic.
 
-Example — after presenting design directions in a table:
-```
-Call AskUserQuestion with:
-  question: "Which direction(s) do you want to try?"
-  header: "Direction"
-  options:
-    - label: "1. Modern Minimal"
-    - label: "2. Eastern Calligraphy"
-    - label: "3. Geometric Tech"
-    - label: "All of the above"
-  multiSelect: true
-```
+## Choosing a dedicated Skill
 
-This applies to: choosing directions, confirming extensions, selecting models.
+When choosing a tool for an unresolved request, prefer the dedicated workflow: for transparent cutouts use `remove_background`; for ecommerce detail images use `generate_product_detail_images`; for posters use `generate_marketing_poster`; for white, smart or custom product backgrounds use `generate_ai_background`; for still-image upscaling use `upscale_image`. Call these tools directly. Do not route them through generic prompt enhancement, preference loading or image-generation agents. Preserve an upstream workflow's explicit tool selection. They require MeiGen credentials and purchased credits; ComfyUI and OpenAI-compatible providers cannot run them. No daily free credits or Web free attempts apply.
 
-### Rule 2: Use image-generator agents for ALL generation
+Use `list_skills` for current inputs, defaults and prices. Ask only for missing required information or unresolved output scope. An explicit requested count/modules/quality already authorizes that scope; do not reconfirm it or add paid images. Product Detail MCP requires explicit `modules` (use `[]` for custom modules only); each selected module is one image. Posters need only a subject; images and copy are optional. Use defaults for unspecified settings and never invent product facts, dates or discounts.
 
-**ALWAYS** use the `meigen:image-generator` agent to call generate_image. NEVER call generate_image directly in the main conversation.
+Use real accessible images only. Both remote and local connections expose `upload_skill_image`; local npm also accepts real file paths for the four ordinary image-input workflows. If the host cannot read an attachment, ask for a public direct HTTPS image URL; never invent paths or base64.
 
-- **Single image**: Spawn 1 `meigen:image-generator` agent
-- **Multiple images**: Spawn N `meigen:image-generator` agents in a **single response** (parallel execution)
+**Upscale is a separate original-image path:** pass the original public direct HTTPS PNG/JPEG/WebP URL as `imageUrl`, at most 64 MiB and 64 MP. Local npm also accepts an actual original PNG/JPEG/WebP path in `imageUrl` through its dedicated upload route, preserving source dimensions. For readable attachment bytes, call `upload_skill_image` with `purpose: "upscale"` (base64 up to 3 MiB decoded); use the returned `imageUrl`. Do not use `purpose: "reference"` or generic reference compression for Upscale. If the host cannot read the attachment, request a real public original-image URL. On every MCP submission, including the first, pass `confirmedCredits` from the live `list_skills` quote within the user or upstream workflow accepted budget; reuse an already explicit acceptance. This pre-dispatch recheck is not an atomic spending cap. Use `mode: "crisp"` (default) or `"creative"` as offered by `list_skills`. `allowDownscale` is opt-in: explain that it permits preprocessing to at most 4096px/16 MP and the final output can be smaller than the original; set it only after the user explicitly accepts that tradeoff. Upscale accepts still images, not video. For `upscale_resize_required` or `price_changed`, return the resize/cost decision to the caller. Reuse an already explicit acceptance; otherwise obtain acceptance of the new tradeoff or price before submitting a new `requestId` with accepted `allowDownscale` and `confirmedCredits`. These are changed, confirmed inputs—not a blind retry of an interrupted submission.
 
-Each agent prompt must be self-contained. Example:
-```
-Task(subagent_type="meigen:image-generator",
-     prompt="Call generate_image with prompt: '[full prompt]'. Do NOT specify model or provider. Omit aspectRatio unless the user explicitly asks for a specific ratio — MeiGen auto-infers the best ratio from the prompt.")
-```
+The caller generates and persists `requestId` for each logical step. For interrupted submissions, call `check_skill` with the original skill/ID before retrying. Follow `nextAction`, including waiting `afterSeconds`; retry only when instructed, using its exact original ID and parameters. Never use a new ID as a blind retry or automatically pay for failed-module replacements. Auth/payment/input rejections require their indicated action instead of polling. Return structured status, task handles and completed image URLs to the caller, with failed modules and refund states separately. The caller owns display and downloads; end users do not need to manage technical IDs.
 
-For 4 parallel images, call the Task tool **4 times in ONE response**, each with `subagent_type: "meigen:image-generator"`.
+## Optional creative workflow
 
-### Rule 3: Present URLs and paths, never describe images
+When asked to develop an idea, use the parts that help:
 
-After generation, relay the **exact** Image URL and "Saved to" path from each result.
-Format:
+1. Clarify an unresolved brief or use the supplied one. Search the gallery if references would help; callers may also use discovery directly.
+2. Craft or enhance prompts when requested. Preserve supplied exact wording and factual constraints. Offer a suitable number of directions without adding paid outputs.
+3. Ask about choices that remain unresolved. A selected count or complete generation plan can proceed directly.
+4. Generate using the selected tool and caller parameters. Direct calls are supported. Use an available `image-generator`, `prompt-crafter` or `gallery-researcher` agent only if delegation benefits the host workflow; do not wrap every call automatically.
+5. Return results to the caller. If delivering directly to a user, present actual completed images/URLs and saved paths when available. Inspect with host vision tools before making visual claims. Never invent a saved file, observed detail or refund.
 
-```
-**Direction 1: Modern Minimal**
-- Image URL: https://images.meigen.ai/...
-- Saved to: ~/Pictures/meigen/2026-02-08_xxxx.jpg
+## Compose ordinary image and video jobs
 
-**Direction 2: Eastern Calligraphy**
-- Image URL: https://images.meigen.ai/...
-- Saved to: ~/Pictures/meigen/2026-02-08_yyyy.jpg
-```
+For MeiGen generation, persist one UUID `requestId` and exact input per logical step. Use `wait: false` to return after submission; local npm also supports `download: false` (downloads are skipped when not waiting). Existing local defaults remain `wait: true`, `download: true`. Read the installed schema for provider/transport support. Remote results are URLs.
 
-**NEVER**:
-- Describe or imagine what the image looks like (you cannot see it)
-- Read the saved image files
-- Write creative commentary about the generated result
+Preserve each returned handle and structured status. Recover through `check_generation` with the original `requestId` or `generationId`; follow `nextAction`, `pollAfterSeconds` and rate-limit delays. Do not change IDs on transient failure or bypass an input conflict. Dedicated Skills instead use `check_skill` with their original Skill/ID and exact `retryParameters`.
 
-### Rule 4: Never specify model or provider
+The caller may schedule authorized independent image or video jobs with bounded concurrency. Local npm has four shared API **submission** slots; polling/downloads happen outside those slots. ComfyUI executes one job at a time. Honor actual backend limits and `Retry-After`; do not impose a ten-image total or a blanket video-serialization rule. Reserve estimated in-flight costs before starting another step and reconcile actual charges. There is no atomic multi-step batch or server-enforced overall workflow budget.
 
-Do NOT pass `model` or `provider` to generate_image unless the user explicitly asks.
-The server auto-detects the best provider and model.
+Use `list_models` for live capabilities and model prices when needed; a supplied supported model/provider remains selected. `generate_video` requires a model and accepts `firstFrame` for supported image-to-video inputs. Chain a completed frame URL directly into that field. The caller decides whether an intermediate preview, human selection or download is required.
 
----
-
-## Available Tools
-
-| Tool | Purpose | Cost |
-|------|---------|------|
-| `search_gallery` | Semantic search across AI image prompts — finds conceptually similar results, not just keyword matches. Also supports category browsing. | Free |
-| `get_inspiration` | Get the full prompt and image URLs for a gallery entry | Free |
-| `enhance_prompt` | Get a system prompt to expand a brief description into a detailed prompt | Free |
-| `list_models` | List available AI models (only when user asks to see/switch models) | Free |
-| `manage_preferences` | Read/save user preferences: default style, aspect ratio (`"auto"` recommended), model, favorites | Free |
-| `generate_image` | Generate an image using AI | Requires API key |
-
-## Agent Delegation
-
-| Agent | When to delegate |
-|-------|-----------------|
-| **image-generator** | **ALL `generate_image` calls.** Spawn one per image. For parallel: spawn N in a single response. |
-| **prompt-crafter** | When you need **2+ distinct prompts** — batch logos, product mockups, style variations. Uses Haiku. |
-| **gallery-researcher** | When exploring the gallery — find references, build mood boards, compare styles. Uses Haiku. |
-
-**CRITICAL**: Never call `generate_image` directly. Always delegate to `meigen:image-generator` via the Task tool.
-
-## Core Workflow Modes
-
-### Mode 1: Single Image
-
-**When**: User wants one image generated.
-
-**Flow**: Write prompt (or `enhance_prompt` if brief) → call `generate_image` directly → present URL + path.
-
-### Mode 2: Parallel Generation (2+ images)
-
-**When**: User needs multiple variations — different directions, styles, or concepts.
-
-**Flow**:
-1. Plan directions, present as a table
-2. **Call `AskUserQuestion`** — which direction(s) to try? Include "All of the above" option
-3. Write prompts for selected directions
-4. **Spawn Task agents** — one per image, all in a single response for parallel execution
-5. Collect results, present URLs + paths in a structured format
-
-**Task agent spawn example** (4 directions):
-```
-In a SINGLE response, call the Task tool 4 times. Omit aspectRatio — the server
-auto-infers per prompt. Only pin a ratio when the user asked for one specifically
-(e.g. square avatars → pass aspectRatio: '1:1' to all four).
-
-Task 1: "Call generate_image with prompt: '[prompt 1]'. Return the full response."
-Task 2: "Call generate_image with prompt: '[prompt 2]'. Return the full response."
-Task 3: "Call generate_image with prompt: '[prompt 3]'. Return the full response."
-Task 4: "Call generate_image with prompt: '[prompt 4]'. Return the full response."
-```
-
-### Mode 3: Creative + Extensions (Multi-step)
-
-**When**: User wants a base design plus derivatives (e.g., "design a logo and make mockups").
-
-**Flow**:
-1. Plan 3-5 directions → **AskUserQuestion** (which to try?)
-2. Generate selected direction(s) via Task agents
-3. Present results with URLs → **AskUserQuestion** ("Use this for extensions, or try another?")
-4. Plan extensions → generate via Task agents using approved Image URL as `referenceImages`
-
-### Mode 4: Inspiration Search
-
-**Flow**: `search_gallery` → `get_inspiration` → present results with copyable prompts.
-
-### Mode 5: Reference Image Generation
-
-**Flow**: Get reference URL or local file path → `generate_image` with `referenceImages` parameter + detailed prompt.
-
-**Sources**: gallery URLs, previous generation URLs, or local file paths (auto-compressed and prepared for the selected provider when needed).
-
-## MeiGen Models
-
-When a user asks about models, refer to this table:
-
-| Model | 4K | Best For |
-|-------|-----|----------|
-| GPT Image 2.0 (default) | Yes | **Near-perfect text rendering** in posters/logos |
-| Nanobanana 2 | Yes | General purpose, high quality |
-| Nanobanana Pro | Yes | Premium quality |
-| Seedream 5.0 Lite | Yes | Fast, stylized imagery |
-| Seedream 4.5 | Yes | Previous-gen alternative |
-| Midjourney V8.1 | No | **Unified general-purpose** — photorealistic + stylized/anime in one model |
-| Flux 2 Klein | No | **Cheapest fast draft** — text-to-image only, no reference images |
-
-When no model is specified, the server uses the MeiGen platform default (typically GPT Image 2.0 at 1K resolution / medium quality, but the authoritative defaults and supported tiers come from the backend — run `list_models` to confirm).
-For high-resolution prints or posters, pass `resolution: "2K"` or `resolution: "4K"` to `generate_image` (when the chosen model supports it).
-To use a specific model, pass `model: "<model-id>"` to `generate_image` (e.g., `model: "seedream-5.0-lite"`).
-
-When a user asks about **cost or pricing**, point them to https://www.meigen.ai/model-comparison — credit prices change over time and the website is the source of truth. Do not quote specific credit numbers from training data.
-
-### Midjourney V8.1 — Notes
-
-`model: "midjourney-v8.1"`. Unified general-purpose Midjourney model that handles **both** photorealistic AND stylized/anime content — there is no separate Niji model exposed via MCP. ~45s, accepts max 1 reference image, returns 4 candidate images per generation.
-
-- Use for product photography, portraits, landscapes, cinematic shots, illustration, and anime/stylized work.
-- **Resolution**: pass `resolution: "1K"` (default) or `"2K"`. `2K` costs more and is best for posters/wallpapers.
-- **Advanced params** (stylize/chaos/weird/raw/iw/sw/sv/quality) run with fixed server-side defaults and **cannot be tuned from MCP**. The only exception is `sref`, settable via `--sref <code>` at the end of the prompt — Midjourney style codes only (numeric like `3799554500` or text like `niji-cute-v1`). No URLs or local paths to `--sref`.
-- **Other Midjourney flags** (`--ar`, `--chaos`, `--niji`, `--seed`, `--q`, etc.) and legacy syntax (`::N` weights, `[a|b]` permutations) are silently stripped by the server. Express intent in natural language; pass aspect ratio via the `aspectRatio` parameter, not `--ar`.
-- **Prompt enhancement**: pass `style: 'realistic'` for general/photorealistic intent, `style: 'anime'` for anime/illustration intent. V8.1 follows the prompt — explicit anime trigger words (e.g. "anime screenshot", "key visual") improve stylized output.
-
-## Reference Image Best Practices
-
-- `referenceImages` accepts URLs or local file paths: `["https://...", "/path/to/image.jpg"]`
-- Local files are compressed in-memory (max 2MB, 2048px) and prepared for the selected provider when needed
-- Always pair with a detailed text prompt — reference guides style, prompt guides content
-- From gallery: `get_inspiration` returns image URLs
-- From generation: `generate_image` returns Image URL in its response
-- From local file: just pass the path directly — the server handles preparation
-
-## Prompt Engineering Quick Reference
-
-### Realistic/Photographic
-- Camera: lens type, aperture, focal length
-- Lighting: direction, quality, color temperature
-- Materials and textures, spatial layers
-
-### Anime/2D
-- Trigger words: "anime screenshot", "key visual", "masterpiece"
-- Character details: eyes, hair, costume, expression, pose
-
-### Illustration/Concept Art
-- Art medium: digital painting, watercolor, oil, etc.
-- Explicit color palette, composition direction
+See [composable workflows](../../../COMPOSABLE_WORKFLOWS.md) for persistent step IDs, budget reservations and recovery examples.

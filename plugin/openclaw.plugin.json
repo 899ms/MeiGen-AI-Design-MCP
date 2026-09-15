@@ -1,8 +1,8 @@
 {
   "id": "meigen-ai-design",
-  "name": "AI Image & Video Generator — GPT Image 2, Seedance, ComfyUI",
-  "description": "AI image and video generation across leading models (GPT Image 2, Nanobanana 2, Seedream 5.0, Midjourney V8.1, Flux 2 Klein, Grok Imagine, Seedance 2.0, Veo 3.1, Grok Video, Agnes Video, local ComfyUI) via MCP. Works in Claude Code, Cursor, Codex, Windsurf, OpenClaw, Hermes Agent, and any MCP-compatible host.",
-  "version": "1.4.0",
+  "name": "AI Image & Video Generator \u2014 GPT Image 2, Seedance, ComfyUI",
+  "description": "Five dedicated MeiGen image workflows plus ordinary image/video generation through MCP. Requires MeiGen purchased credits for dedicated workflows; ordinary images also support configured BYOK or ComfyUI.",
+  "version": "2.0.0",
   "skills": [
     "./skills"
   ],
@@ -10,5 +10,15 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "mcpServers": {
+    "meigen": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "meigen@2.0.0"
+      ]
+    }
   }
 }

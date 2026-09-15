@@ -1,5 +1,6 @@
 /**
- * 幂等 attempt 存储(2026-08-05 七审 P1 重构:区分 in-flight 与 retryable)。
+ * Legacy process-local attempt helper, retained for older API consumers.
+ * Ordinary 2.0 MCP generation uses generation-request-store and server receipts instead.
  *
  * 语义:
  * - 并发同参数调用 = 各自独立的逻辑尝试 → 各拿新键(用户要两张图就该建两单;
@@ -7,7 +8,7 @@
  * - 网络错误 / 5xx(服务端可能已扣点)→ 键转 retryable,宿主重试同参数复用同键,
  *   服务端同事务判重不双扣
  * - 提交成功 / 4xx 明确拒绝 → 释放(该尝试已终结)
- * 本地 stdio 进程有状态,模块级 Map;进程重启丢失 = 退化为无幂等,可接受。
+ * This legacy Map does not survive restart and must not be used for new workflow recovery.
  */
 // TTL 覆盖服务端 40min 观察窗(九审 P1:10min 太短,慢任务重试窗内键就过期)
 export const ATTEMPT_TTL_MS = 45 * 60_000

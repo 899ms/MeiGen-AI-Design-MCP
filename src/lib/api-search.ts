@@ -9,6 +9,7 @@ export interface ApiSearchResult {
   text: string
   thumbnail_url: string | null
   media_urls: string[] | null
+  matched_media_index?: number | null
   author_username: string | null
   author_display_name: string | null
   likes: number
@@ -52,6 +53,7 @@ export async function apiSearchPosts(
       type: 'posts',
       limit: String(limit),
       offset: String(offset),
+      media: 'matched-v1',
     })
     const url = `${baseUrl}/api/search?${params}`
 

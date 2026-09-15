@@ -1,47 +1,30 @@
 #!/usr/bin/env bash
-# Verify the npm/plugin version is consistent across the 5 critical files.
-# Run on every PR/push; fails if any file drifts.
-
+# Runtime pins follow npm. Distribution versions are independently owned.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-
-# 1. package.json (source of truth)
-PKG_VER=$(node -p "require('./package.json').version")
-
-# 2. .claude-plugin/marketplace.json — plugins[0].version
-MARKETPLACE_VER=$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")
-
-# 3. plugin/.claude-plugin/plugin.json — top-level version
-PLUGIN_VER=$(node -p "require('./plugin/.claude-plugin/plugin.json').version")
-
-# 4. plugin/.mcp.json — pinned npx version
-MCP_PIN_VER=$(node -p "require('./plugin/.mcp.json').meigen.args.find(a => a.startsWith('meigen@')).split('@')[1]")
-
-# 5. src/server.ts — McpServer({ version: '...' })
-SERVER_VER=$(grep -oE "version: ['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]" src/server.ts | head -1 | sed -E "s/.*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]/\1/")
-
-echo "package.json                         : $PKG_VER (truth)"
-echo "claude-plugin/marketplace.json       : $MARKETPLACE_VER"
-echo "plugin/.claude-plugin/plugin.json    : $PLUGIN_VER"
-echo "plugin/.mcp.json (npx pin)           : $MCP_PIN_VER"
-echo "src/server.ts (McpServer version)    : $SERVER_VER"
-
-FAIL=0
-for FILE_VAR in MARKETPLACE_VER PLUGIN_VER MCP_PIN_VER SERVER_VER; do
-  VAL="${!FILE_VAR}"
-  if [[ "$VAL" != "$PKG_VER" ]]; then
-    echo "::error::Version drift: $FILE_VAR=$VAL but package.json=$PKG_VER"
-    FAIL=1
-  fi
-done
-
-if [[ $FAIL -eq 1 ]]; then
-  echo
-  echo "Fix: bump these files to match package.json. See CLAUDE.md → 'Version sync checklist'."
-  exit 1
-fi
-
-echo
-echo "All five tracked files are in sync at $PKG_VER."
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs'
+const json = path => JSON.parse(readFileSync(path, 'utf8'))
+const pkg = json('package.json')
+const lock = json('package-lock.json')
+const plugin = json('plugin/.claude-plugin/plugin.json')
+const entry = json('.claude-plugin/marketplace.json').plugins.find(p => p.name === plugin.name)
+const openclaw = json('plugin/openclaw.plugin.json')
+const server = readFileSync('src/server.ts', 'utf8').match(/version:\s*['"]([0-9]+\.[0-9]+\.[0-9]+)['"]/)?.[1]
+const skill = readFileSync('openclaw/SKILL.md', 'utf8').match(/^version:\s*(\S+)/m)?.[1]
+const semver = /^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/
+const fail = message => { console.error(`::error::${message}`); process.exitCode = 1 }
+if (lock.version !== pkg.version || lock.packages?.['']?.version !== pkg.version) fail('npm lockfile version must match package.json')
+if (server !== pkg.version) fail(`MCP runtime ${server} differs from npm ${pkg.version}`)
+if (!entry || entry.version !== plugin.version) fail('Self-owned Claude marketplace entry must match its plugin manifest version')
+for (const [name, version] of [['npm', pkg.version], ['Claude plugin', plugin.version], ['OpenClaw plugin', openclaw.version], ['ClawHub standalone Skill', skill]]) {
+  if (!version || !semver.test(version)) fail(`${name} has an invalid or missing version`)
+  console.log(`${name}: ${version}`)
+}
+for (const [path, servers] of [['plugin/.mcp.json', json('plugin/.mcp.json').mcpServers], ['plugin/openclaw.plugin.json', openclaw.mcpServers]]) {
+  const server = servers?.meigen
+  if (server?.command !== 'npx' || !server.args?.includes(`meigen@${pkg.version}`)) fail(`${path} must declare the pinned meigen npm server`)
+}
+if (!process.exitCode) console.log('Runtime pins and independently versioned distribution manifests are coherent.')
+NODE
