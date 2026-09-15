@@ -62,7 +62,8 @@ jobs:
         run: pnpm typecheck
 
       - name: Run tests
-        run: pnpm test
+        # pnpm otherwise uses cmd.exe on Windows even when this step uses bash.
+        run: pnpm --config.script-shell=bash test
 
       # Clean build catches stale dist files that tsc --noEmit can't detect
       # (e.g., a deleted source file whose dist artifact lingers in the repo).

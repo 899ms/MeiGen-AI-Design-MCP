@@ -4,10 +4,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import apiModule from '../lib/meigen-api.js'
-import operationModule from '../lib/generation-operation.js'
-import contractModule from '../lib/generation-contract.js'
-import checkModule from './check-generation.js'
+import { createRequire } from 'node:module'
+// These sources compile to CJS. Use one loader/cache on Node 20 as in the shipped runtime.
+const require = createRequire(import.meta.url)
+const apiModule = require('../lib/meigen-api.ts')
+const operationModule = require('../lib/generation-operation.ts')
+const contractModule = require('../lib/generation-contract.ts')
+const checkModule = require('./check-generation.ts')
 const { MeiGenApiClient } = apiModule
 const { runMeiGenGeneration, generationStatusOutput } = operationModule
 const { GenerationError, generationResult } = contractModule

@@ -7,15 +7,18 @@ import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import sharp from 'sharp'
 import { z } from 'zod'
-import apiModule from '../lib/meigen-api.js'
-import operationModule from '../lib/generation-operation.js'
-import contractModule from '../lib/generation-contract.js'
-import httpModule from '../lib/generation-http.js'
-import semaphoreModule from '../lib/semaphore.js'
-import imageModule from './generate-image.js'
-import videoModule from './generate-video.js'
-import checkModule from './check-generation.js'
-import modelsModule from './list-models.js'
+import { createRequire } from 'node:module'
+// These sources compile to CJS. Use one loader/cache on Node 20 as in the shipped runtime.
+const require = createRequire(import.meta.url)
+const apiModule = require('../lib/meigen-api.ts')
+const operationModule = require('../lib/generation-operation.ts')
+const contractModule = require('../lib/generation-contract.ts')
+const httpModule = require('../lib/generation-http.ts')
+const semaphoreModule = require('../lib/semaphore.ts')
+const imageModule = require('./generate-image.ts')
+const videoModule = require('./generate-video.ts')
+const checkModule = require('./check-generation.ts')
+const modelsModule = require('./list-models.ts')
 const { MeiGenApiClient } = apiModule
 const { runMeiGenGeneration } = operationModule
 const { generationOutputSchema } = contractModule

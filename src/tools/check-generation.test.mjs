@@ -4,9 +4,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-// tsconfig 是 Node16/CJS 输出,tsx 下具名导出折叠进 default —— 用 default interop 解构
-import checkGenerationModule from './check-generation.js';
-import attemptStoreModule from '../lib/attempt-store.js';
+import { createRequire } from 'node:module'
+// These sources compile to CJS. Use one loader/cache on Node 20 as in the shipped runtime.
+const require = createRequire(import.meta.url)
+const checkGenerationModule = require('./check-generation.ts')
+const attemptStoreModule = require('../lib/attempt-store.ts')
 
 const { registerCheckGeneration } = checkGenerationModule;
 const { acquireAttempt, suspendAttempt, __resetAttempts } = attemptStoreModule;
