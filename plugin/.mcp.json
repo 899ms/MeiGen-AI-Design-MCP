@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "meigen@2.0.0"
+        "meigen@2.0.1"
       ]
     }
   }

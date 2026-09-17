@@ -89,6 +89,20 @@ When a decision becomes obsolete (the constraint disappears, the data flips), mo
 
 **How to apply**: When adding a new distribution doc that references npm, add it to `scripts/ci/check-pinned-npm.sh:DIST_FILES`. Never use `meigen@latest` outside `init.ts`.
 
+### Reference video/audio: arrays with the legacy scalar kept, and no per-model enums (2026-09)
+**Decision**: `generate_video` takes `referenceVideos` and `referenceAudios` as `z.array(z.string()).max(10).optional()`. The old scalar `referenceVideo` is kept **forever** as an alias (it must equal the first array entry when both are sent, otherwise `invalid_reference` before any upload), and `referenceVideoDuration` stays accepted-and-ignored. The schema carries no per-model caps: not the clip counts (Seedance 2.0 allows 3, 2.5 allows 10), not the per-clip or total seconds, not the audio formats. `.max(10)` is only a transport sanity bound; the real limits come from `list_models` and the backend rejects an over-limit request before charging.
+
+**Why**: Two rules meeting. (1) "No MCP-side defaults / no enums for backend-dependent fields" — a `z.array(...).max(3)` would have frozen Seedance 2.0's cap into every shipped npm version, and Seedance 2.5 (10 clips, 30s) would have needed a release before anyone could use it. (2) npm has a long stale tail: a caller pinned to an old version must keep working, so a scalar that shipped in a released schema is never removed, and an empty array is never emitted in its place (`referenceVideos: []` would change the request fingerprint and the submitted body, i.e. the paid identity of a retry).
+
+**How to apply**: New per-model reference limits go into `capabilities.video` on `/api/models` and are rendered by `list_models`, never into the Zod schema. When adding another reference kind, append its body key **after** the existing ones in `meigen-api.ts:generateVideo` so a legacy-shaped body still serializes byte-identically, give it its own write-once receipt file (like `video-references.json` / `audio-references.json`) rather than changing `references.json`, and include its identities as a separate fingerprint sub-array that is omitted when empty.
+
+### Reference clips: images.meigen.ai only, and local clips are fingerprinted by streaming (2026-09-17)
+**Decision**: `referenceVideos` / `referenceAudios` (and the legacy `referenceVideo` scalar) given as URLs must be `https://images.meigen.ai/...`; any other host fails locally with the same guidance the backend would give. Local file paths are still uploaded automatically. Local clips are fingerprinted **sequentially with a streaming SHA-256** (only the first 12 bytes are held for container detection); the upload step re-reads one clip at a time and re-hashes it before the PUT, raising `reference_changed` on mismatch.
+
+**Why**: The backend's authoritative duration probe only fetches from our own CDN (SSRF whitelist), so an external URL is a guaranteed pre-charge 400 — failing fast keeps a confused request away from a paid submission without widening the whitelist. The previous `Promise.all` + full `Buffer` read held up to 10 × 200 MiB at once and could OOM the MCP host on a legitimate request.
+
+**How to apply**: Keep `MEDIA_REFERENCE_HOST` in `src/lib/generation-references.ts` in sync with the backend probe whitelist (`src/lib/mp4-duration.ts` / `audio-duration.ts` in the Web repo). Never reintroduce a bytes-carrying `MediaReference`; anything that needs the clip's bytes must read them at upload time and verify the fingerprint first.
+
 ### Categories are 6 (post-2026-04-29 reorg)
 **Decision**: Gallery categories: Photography (533), Illustration & 3D (370), Product & Brand (239), Food & Drink (156), Poster Design (146), UI & Graphic (52). Old single-word names (`3D`, `Food`, `Photograph`, `Product`, `Poster`, `Design`) map via `CATEGORY_DISPLAY_MAP` for old data. Retired: `App`, `Girl`, `JSON`, `Other`.
 

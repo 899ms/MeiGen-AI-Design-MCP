@@ -9,6 +9,7 @@ import type { MeiGenConfig } from '../config.js'
 import type { MeiGenApiClient } from '../lib/meigen-api.js'
 import { generationControls, generationOutputSchema, generationResult, errorOutput, GenerationError } from '../lib/generation-contract.js'
 import { runMeiGenGeneration } from '../lib/generation-operation.js'
+import { mergeReferenceVideos } from '../lib/generation-references.js'
 
 export const generateVideoSchema = {
   ...generationControls,
@@ -29,30 +30,49 @@ export const generateVideoSchema = {
     .describe('Optional last-frame image for a model that supports it. Accepts a public URL or local file path; requires firstFrame. Use list_models for the live model contract.'),
   referenceVideo: z.string().optional()
     .describe(
-      'Optional reference video URL for a model that advertises reference-video support in list_models. Must be a MeiGen video URL on images.meigen.ai (a previous generation result `videoUrl`, or a clip uploaded via meigen.ai) — other domains are rejected because billing metadata must be verifiable; local paths are not supported. ' +
-      'IMPORTANT — prompt requirement: to make the new clip semantically continue the reference, the `prompt` MUST explicitly say "extend" / "continue" (e.g. prefix with "Extend this video with the following plot:"). Without that, the model treats the video as visual reference only and the new clip may drift from a true continuation. ' +
-      'Output behavior: the output is only the configured `duration` of new content — the reference video is not concatenated into the output. ' +
-      'Billing may include the reference clip and model-specific minimums. The server probes authoritative MP4 duration; do not estimate billing from client metadata.'
+      'Deprecated single-clip alias of referenceVideos. Still accepted forever; when referenceVideos is also supplied it must equal its first entry. Prefer referenceVideos.'
+    ),
+  referenceVideos: z.array(z.string()).max(10).optional()
+    .describe(
+      'Reference video clips for a model that advertises reference-video support in list_models. Each entry is either an https://images.meigen.ai/... URL — typically a clip MeiGen generated earlier, passed through unchanged — or a local .mp4/.mov path, which is uploaded for you (local paths require MEIGEN_API_TOKEN). Other hosts are rejected: the server only probes clips it can fetch from that CDN, so pass the local file instead. ' +
+      'Per-model limits — maximum number of clips, per-clip seconds and the maximum SUM of clip seconds — come from list_models; the server enforces them and rejects an over-limit request before charging. ' +
+      'IMPORTANT — prompt requirement: to make the new clip semantically continue a reference, the `prompt` MUST explicitly say "extend" / "continue" (e.g. "Extend this video with the following plot:"). Without that, the model treats the clips as visual reference only. ' +
+      'Refer to a specific clip in the prompt as "Video 1", "Video 2" … numbered in the order given here. ' +
+      'Output behavior: the output is only the configured `duration` of new content — reference clips are never concatenated into it. ' +
+      'Billing counts the SUM of the server-probed input video seconds plus the output; do not estimate it from client-side metadata.'
+    ),
+  referenceAudios: z.array(z.string()).max(10).optional()
+    .describe(
+      'Reference audio clips for a model whose list_models entry shows a "Reference audio" line. Each entry is either an https://images.meigen.ai/... URL or a local .wav/.mp3 path, which is uploaded for you (local paths require MEIGEN_API_TOKEN). Other hosts are rejected: pass the local file and the server uploads it. ' +
+      'Per-model limits (clip count, per-clip seconds, total seconds, accepted formats and per-file size) come from list_models. On a model whose line says it requires a visual reference (Seedance 2.0), the request must also carry at least one reference image or reference video — audio alone is rejected. ' +
+      'Refer to a clip in the prompt as "Audio 1", "Audio 2" … numbered in the order given here. Reference audio seconds are never billed.'
     ),
   referenceVideoDuration: z.number().int().positive().optional()
-    .describe('Deprecated compatibility hint. Ignored because the server probes authoritative MP4 duration.'),
+    .describe('Deprecated compatibility hint. Ignored because the server probes the authoritative duration of every clip.'),
 }
 
 export function registerGenerateVideo(server: McpServer, apiClient: MeiGenApiClient, config: MeiGenConfig) {
   server.registerTool('generate_video', {
-    description: 'Generate a MeiGen video using a required live model ID from list_models. Preserve the caller’s resolved prompt, parameters and authorized scope. Set requestId, wait=false and download=false for workflow submission; then query check_generation. At most four submissions run concurrently per MCP process; the backend quota and Retry-After remain authoritative. Video generation consumes purchased credits.',
+    description: 'Generate a MeiGen video using a required live model ID from list_models. Reference videos and reference audio are passed as referenceVideos / referenceAudios arrays (images.meigen.ai URLs, or local files which are uploaded for you — other hosts are rejected); per-model counts and second budgets come from list_models, and reference audio is never billed. Preserve the caller’s resolved prompt, parameters and authorized scope. Set requestId, wait=false and download=false for workflow submission; then query check_generation. At most four submissions run concurrently per MCP process; the backend quota and Retry-After remain authoritative. Video generation consumes purchased credits.',
     inputSchema: generateVideoSchema, outputSchema: generationOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true },
-  }, async ({ prompt, model, modelId, tier, duration, resolution, aspectRatio, firstFrame, lastFrame, referenceVideo, referenceVideoDuration, requestId, wait = true, download = true }, extra) => {
+  }, async ({ prompt, model, modelId, tier, duration, resolution, aspectRatio, firstFrame, lastFrame, referenceVideo, referenceVideos, referenceAudios, referenceVideoDuration, requestId, wait = true, download = true }, extra) => {
     if (!model && !modelId) return generationResult(errorOutput(new GenerationError('A video model or modelId from list_models is required.', 'model_required')))
     if (model && modelId && model !== modelId) return generationResult(errorOutput(new GenerationError('model and modelId must match when both are provided.', 'model_alias_conflict')))
     model = model ?? modelId
     if (lastFrame && !firstFrame) return generationResult(errorOutput(new GenerationError('lastFrame requires firstFrame.', 'invalid_reference'), { requestId, mediaType: 'video', provider: 'meigen' }))
-    if (referenceVideoDuration !== undefined && !referenceVideo) return generationResult(errorOutput(new GenerationError('referenceVideoDuration requires referenceVideo; the backend measures its actual duration.', 'invalid_reference'), { requestId, mediaType: 'video', provider: 'meigen' }))
+    if (referenceVideoDuration !== undefined && !referenceVideo && !referenceVideos?.length) return generationResult(errorOutput(new GenerationError('referenceVideoDuration requires a reference video; the backend measures the actual duration of every clip.', 'invalid_reference'), { requestId, mediaType: 'video', provider: 'meigen' }))
+    // Reject a contradictory legacy/array pair here, before any upload or paid submission.
+    try { mergeReferenceVideos(referenceVideo, referenceVideos) }
+    catch (error) { return generationResult(errorOutput(error, { requestId, mediaType: 'video', provider: 'meigen' })) }
     return generationResult(await runMeiGenGeneration('video', {
       prompt, modelId: model, tier, duration, resolution, aspectRatio,
       referenceImages: [firstFrame, lastFrame].filter((value): value is string => Boolean(value)),
-      referenceVideo, requestId, wait, download,
+      referenceVideo,
+      // Never [] — an empty array would change this request's saved fingerprint.
+      referenceVideos: referenceVideos?.length ? referenceVideos : undefined,
+      referenceAudios: referenceAudios?.length ? referenceAudios : undefined,
+      requestId, wait, download,
     }, apiClient, config, extra.signal, async message => {
       try { await extra.sendNotification({ method: 'notifications/message', params: { level: 'info', logger: 'generate_video', data: message } }) } catch { /* Hosts may not implement logging. */ }
     }))

@@ -5,8 +5,12 @@ import { homedir } from 'node:os'
 import type { MeiGenConfig } from '../config.js'
 import type { MeiGenApiClient, MeiGenGenerationStatus } from './meigen-api.js'
 import { GenerationError, type GenerationOutput, errorOutput, isRequestNotFound } from './generation-contract.js'
+import { ImageUploadError } from './upload.js'
 import { withGenerationReceipt } from './generation-request-store.js'
-import { fingerprintReferences, uploadReferences, publicReferenceUrl } from './generation-references.js'
+import {
+  fingerprintReferences, uploadReferences, publicReferenceUrl, localReferencePath,
+  fingerprintMediaReferences, uploadMediaReferences, mergeReferenceVideos, mediaReferenceUrl, type MediaReference,
+} from './generation-references.js'
 import { streamResponseToFile, withHttpResponse, abortReason } from './generation-http.js'
 
 export interface GenerationInput {
@@ -19,10 +23,53 @@ export interface GenerationInput {
   tier?: string
   duration?: number
   referenceImages?: string[]
+  /** Deprecated single-clip alias kept forever; merged into referenceVideos. */
   referenceVideo?: string
+  /** Reference video clips: https://images.meigen.ai/... URLs and/or local .mp4/.mov paths (auto-uploaded). */
+  referenceVideos?: string[]
+  /** Reference audio clips: https://images.meigen.ai/... URLs and/or local .wav/.mp3 paths (auto-uploaded). */
+  referenceAudios?: string[]
   requestId?: string
   wait?: boolean
   download?: boolean
+}
+
+/** 文件系统错误码:本地路径不存在 / 无权限 / 是目录 —— 修正输入,不是重试也不是查任务。 */
+const FILE_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'ENOTDIR', 'ELOOP', 'ENAMETOOLONG'])
+
+/**
+ * 提交前(指纹 / 读文件 / presign / PUT)的统一错误边界:生成 POST 还没发出,任何失败都不能
+ * 让调用方去 check_generation 查一个不存在的任务(验收审查 P1:缺失的本地路径曾变成
+ * request_interrupted → check_generation)。按阶段翻成生成合同里的错误,nextAction 才会落到
+ * configure_auth / top_up / resolve_error / retry_request,且都保留同一个 requestId。
+ */
+export function preSubmitError(error: unknown, signal?: AbortSignal): unknown {
+  // 调用方取消(含自定义 abort reason,不只 AbortError):提交前停下,同 ID 可重来
+  if (signal?.aborted) return new GenerationError('Cancelled before submission; nothing was submitted or charged.', 'cancelled', 499, true)
+  if (error instanceof GenerationError) {
+    // 语义错误(invalid_reference / unauthorized / insufficient_credits / reference_changed …)原样透传;
+    // 可重试的基础设施错误(presign 超时 request_timeout、坏 JSON invalid_response、5xx)在提交前
+    // 一律不能引到 check_generation —— 生成 POST 还没发,没有任务可查(验收审查 P1)。
+    if (!error.retryable || error.code === 'cancelled' || error.code === 'pre_submit_failed' || error.code === 'upload_failed') return error
+    return new GenerationError(`${error.message} Nothing was submitted or charged.`, 'pre_submit_failed', error.httpStatus, true, error.details)
+  }
+  if (error instanceof ImageUploadError) {
+    const status = error.status
+    // 只有 presign 阶段的 401/403 才是 Key 问题;PUT 403 = 签名 URL 过期 / 存储侧拒绝,重新走一遍即可
+    if ((status === 401 || status === 403) && error.stage !== 'put') return new GenerationError(error.message, 'unauthorized', status, false)
+    if (status === 402) return new GenerationError(error.message, 'insufficient_credits', 402, false)
+    if (status === 400 || status === 413 || status === 415 || status === 422) return new GenerationError(error.message, 'invalid_reference', status, false)
+    return new GenerationError(`${error.message} No generation was submitted or charged.`, 'upload_failed', status >= 500 && status < 600 ? status : 503, true)
+  }
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new GenerationError('Cancelled before submission; nothing was submitted or charged.', 'cancelled', 499, true)
+  }
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : ''
+  if (FILE_ERROR_CODES.has(code)) {
+    const path = typeof error === 'object' && error !== null && 'path' in error ? ` (${String((error as { path: unknown }).path)})` : ''
+    return new GenerationError(`A local reference file could not be read${path}: ${code}. Check the path and permissions; nothing was submitted or charged.`, 'invalid_reference', 400, false)
+  }
+  return new GenerationError(`${error instanceof Error ? error.message : 'Reference preparation failed.'} Nothing was submitted or charged.`, 'pre_submit_failed', 503, true)
 }
 
 export function generationStatusOutput(status: MeiGenGenerationStatus, context: Partial<GenerationOutput>): GenerationOutput {
@@ -72,12 +119,42 @@ export async function runMeiGenGeneration(mediaType: 'image' | 'video', input: G
   try {
     if (input.wait === false && !input.requestId) throw new GenerationError('wait=false requires a persistent requestId UUID chosen by the caller.', 'request_id_required')
     if (!config.meigenApiToken) throw new GenerationError('MEIGEN_API_TOKEN is required. Create a key at https://www.meigen.ai/profile/api-keys and configure it privately. API generation uses purchased credits only.', 'authentication_required', 401)
-    abortReason(signal)
-    const references = await fingerprintReferences(input.referenceImages ?? [], signal)
-    const { requestId: _id, wait: _wait, download: _download, referenceImages: _references, ...parameters } = input
-    if (parameters.referenceVideo) parameters.referenceVideo = publicReferenceUrl(parameters.referenceVideo)
+    // 提交前阶段(指纹 / 读文件)统一错误边界,见 preSubmitError
+    let references: Awaited<ReturnType<typeof fingerprintReferences>>
+    let parameters: Omit<GenerationInput, 'requestId' | 'wait' | 'download' | 'referenceImages' | 'referenceVideos' | 'referenceAudios'>
+    let _id: GenerationInput['requestId'], _wait: GenerationInput['wait'], _download: GenerationInput['download'], _references: GenerationInput['referenceImages'], _videos: GenerationInput['referenceVideos'], _audios: GenerationInput['referenceAudios']
+    let videos: string[]
+    let audios: string[]
+    let videoReferences: MediaReference[] = []
+    let audioReferences: MediaReference[] = []
+    try {
+      abortReason(signal)
+      references = await fingerprintReferences(input.referenceImages ?? [], signal)
+      ;({ requestId: _id, wait: _wait, download: _download, referenceImages: _references, referenceVideos: _videos, referenceAudios: _audios, ...parameters } = input)
+      videos = mergeReferenceVideos(parameters.referenceVideo, input.referenceVideos)
+      audios = input.referenceAudios ?? []
+      // Identity of an OLD request must not move. A lone images.meigen.ai clip passed through the
+      // deprecated scalar keeps its historical place in both the fingerprint and the request body,
+      // so a receipt written by an earlier release still recovers its already-paid job.
+      const legacyScalarOnly = !input.referenceVideos?.length && audios.length === 0 &&
+        (videos.length === 0 || localReferencePath(videos[0]) === undefined)
+      if (legacyScalarOnly) {
+        // 同一条 host 规则:images.meigen.ai 的 URL 归一化结果与 publicReferenceUrl 逐字节相同,旧 receipt
+        // 的身份不动;其它 host 本来就会被后端在扣点前 400,这里改为本地即刻给出同一份指引。
+        if (parameters.referenceVideo) parameters.referenceVideo = mediaReferenceUrl(parameters.referenceVideo, 'video')
+      } else {
+        delete parameters.referenceVideo
+        videoReferences = await fingerprintMediaReferences(videos, 'video', signal)
+        audioReferences = await fingerprintMediaReferences(audios, 'audio', signal)
+      }
+    } catch (error) {
+      throw preSubmitError(error, signal)
+    }
     const canonicalParameters = Object.fromEntries(Object.entries(parameters).filter(([, value]) => value !== undefined).sort(([left], [right]) => left.localeCompare(right)))
-    const fingerprint = createHash('sha256').update(JSON.stringify({ mediaType, parameters: canonicalParameters, references: references.map(value => value.identity) })).digest('hex')
+    const fingerprint = createHash('sha256').update(JSON.stringify({ mediaType, parameters: canonicalParameters, references: references.map(value => value.identity),
+      // Absent sub-arrays keep pre-existing fingerprints byte-identical.
+      ...(videoReferences.length ? { videoReferences: videoReferences.map(value => value.identity) } : {}),
+      ...(audioReferences.length ? { audioReferences: audioReferences.map(value => value.identity) } : {}) })).digest('hex')
     const submitted = await withGenerationReceipt(config, requestId, fingerprint, async (receipt, save) => {
       if (input.requestId || receipt.references || receipt.generationId) {
         try {
@@ -98,8 +175,17 @@ export async function runMeiGenGeneration(mediaType: 'image' | 'video', input: G
           if (!unsubmitted && !paymentRetry && !expiredLease) throw error
         }
       }
-      if (!receipt.references) { receipt.references = await uploadReferences(references, config, signal); await save() }
-      const params = { ...parameters, requestId, referenceImages: receipt.references, signal }
+      try {
+        if (!receipt.references) { receipt.references = await uploadReferences(references, config, signal); await save() }
+        if (videoReferences.length && !receipt.videoReferences) { receipt.videoReferences = await uploadMediaReferences(videoReferences, input.modelId, config, signal); await save() }
+        if (audioReferences.length && !receipt.audioReferences) { receipt.audioReferences = await uploadMediaReferences(audioReferences, input.modelId, config, signal); await save() }
+      } catch (error) {
+        throw preSubmitError(error, signal)
+      }
+      // Empty stays undefined, never []: the submitted body is this request's paid identity.
+      const params = { ...parameters, requestId, referenceImages: receipt.references,
+        ...(receipt.videoReferences?.length ? { referenceVideos: receipt.videoReferences } : {}),
+        ...(receipt.audioReferences?.length ? { referenceAudios: receipt.audioReferences } : {}), signal }
       const result = mediaType === 'video' ? await api.generateVideo({ ...params, modelId: input.modelId! }) : await api.generateImage(params)
       // Persist the accepted handle BEFORE polling or optional downloads. Never clear it on terminal results.
       receipt.generationId = result.generationId; receipt.modelId = result.modelId; receipt.creditsUsed = result.creditsUsed

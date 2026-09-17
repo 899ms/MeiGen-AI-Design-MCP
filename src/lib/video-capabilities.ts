@@ -1,9 +1,29 @@
 import type { MeiGenModel } from './meigen-api.js'
 
 type ApiVideoCapabilities = NonNullable<NonNullable<MeiGenModel['capabilities']>['video']>
-export type McpVideoCapabilities = Omit<ApiVideoCapabilities, 'billing'> & {
-  valid: boolean
-  billing: NonNullable<ApiVideoCapabilities['billing']> | null
+export type McpReferenceVideo =
+  Omit<ApiVideoCapabilities['referenceVideo'], 'maxCount' | 'maxTotalSeconds' | 'maxUploadBytes'> & {
+    /** Clips per request. An older cached /api/models body has no field ⇒ the historical 1. */
+    maxCount: number
+    /** SUM of clip seconds per request. Absent ⇒ maxSeconds (the historical single-clip cap). */
+    maxTotalSeconds: number
+    maxUploadBytes: number
+  }
+export type McpReferenceAudio = NonNullable<ApiVideoCapabilities['referenceAudio']>
+export type McpVideoCapabilities =
+  Omit<ApiVideoCapabilities, 'billing' | 'referenceVideo' | 'referenceAudio'> & {
+    valid: boolean
+    billing: NonNullable<ApiVideoCapabilities['billing']> | null
+    referenceVideo: McpReferenceVideo
+    referenceAudio: McpReferenceAudio
+  }
+
+function disabledReferenceVideo(): McpReferenceVideo {
+  return { enabled: false, minSeconds: 0, maxSeconds: 0, maxCount: 0, maxTotalSeconds: 0, maxUploadBytes: 0 }
+}
+
+function disabledReferenceAudio(): McpReferenceAudio {
+  return { enabled: false, minSeconds: 0, maxSeconds: 0, maxCount: 0, maxTotalSeconds: 0, maxUploadBytes: 0, formats: [], requiresVisualReference: false }
 }
 
 const LEGACY_REFERENCE_MIN_SECONDS = 2
@@ -39,9 +59,43 @@ function invalidCapabilities(): McpVideoCapabilities {
   return {
     valid: false,
     outputDuration: null,
-    referenceVideo: { enabled: false, minSeconds: 0, maxSeconds: 0, maxUploadBytes: 0 },
+    referenceVideo: disabledReferenceVideo(),
+    referenceAudio: disabledReferenceAudio(),
     billing: null,
     requiresFirstFrame: false,
+  }
+}
+
+/**
+ * Reference AUDIO is additive and deliberately independent of the billing contract: the vendor
+ * token formula counts only input VIDEO seconds, so audio support must never be gated on
+ * billing.referenceSeconds. Absent node ⇒ disabled (a pre-rollout cached body is not broken);
+ * a present but malformed node ⇒ null, which fails the whole capability closed.
+ */
+function parseReferenceAudio(value: unknown): McpReferenceAudio | null {
+  if (value === undefined) return disabledReferenceAudio()
+  const raw = record(value)
+  if (!raw || typeof raw.enabled !== 'boolean') return null
+  if (!raw.enabled) return disabledReferenceAudio()
+  const minSeconds = positiveInteger(raw.minSeconds)
+  const maxSeconds = positiveInteger(raw.maxSeconds)
+  const maxCount = positiveInteger(raw.maxCount)
+  const maxTotalSeconds = positiveInteger(raw.maxTotalSeconds)
+  const maxUploadBytes = positiveInteger(raw.maxUploadBytes)
+  const formats = strictStrings(raw.formats)
+  // Bounds mirror the site's resolveReferenceAudio byte for byte: this file is a copy of that
+  // contract, and a looser copy here would let the MCP advertise what the server then rejects.
+  const requiresVisualReference = raw.requiresVisualReference === undefined ? false : raw.requiresVisualReference
+  if (
+    minSeconds === null || maxSeconds === null || maxCount === null ||
+    maxTotalSeconds === null || maxUploadBytes === null || !formats ||
+    typeof requiresVisualReference !== 'boolean' ||
+    minSeconds > maxSeconds || maxTotalSeconds < maxSeconds || maxTotalSeconds > maxCount * maxSeconds
+  ) return null
+  return {
+    enabled: true, minSeconds, maxSeconds, maxCount, maxTotalSeconds, maxUploadBytes,
+    formats: formats.map((format) => format.toLowerCase()),
+    requiresVisualReference,
   }
 }
 
@@ -100,11 +154,14 @@ function normalizeCandidate(value: unknown): McpVideoCapabilities | null {
 
   const reference = record(raw.referenceVideo)
   if (!reference || typeof reference.enabled !== 'boolean') return invalidCapabilities()
+  const referenceAudio = parseReferenceAudio(raw.referenceAudio)
+  if (!referenceAudio) return invalidCapabilities()
   if (!reference.enabled) {
     return {
       valid: true,
       outputDuration,
-      referenceVideo: { enabled: false, minSeconds: 0, maxSeconds: 0, maxUploadBytes: 0 },
+      referenceVideo: disabledReferenceVideo(),
+      referenceAudio,
       billing: { mode: billingMode, requestDefaultSeconds },
       requiresFirstFrame: raw.requiresFirstFrame,
     }
@@ -112,6 +169,12 @@ function normalizeCandidate(value: unknown): McpVideoCapabilities | null {
   const minSeconds = positiveInteger(reference.minSeconds)
   const maxSeconds = positiveInteger(reference.maxSeconds)
   const maxUploadBytes = positiveInteger(reference.maxUploadBytes)
+  // Additive fields: absent keeps the historical single-clip contract; present-but-malformed
+  // fails closed rather than silently restoring a 1-clip cap on a multi-clip model.
+  // maxTotalSeconds may never exceed maxSeconds — the billing RPC checks the SUM of clip seconds
+  // against maxSeconds, so a larger total would be refused at charge time anyway.
+  const maxCount = reference.maxCount === undefined ? 1 : positiveInteger(reference.maxCount)
+  const maxTotalSeconds = reference.maxTotalSeconds === undefined ? maxSeconds : positiveInteger(reference.maxTotalSeconds)
   const tiers = reference.tiers === undefined ? undefined : strictStrings(reference.tiers)
   const resolutions = reference.resolutions === undefined
     ? undefined
@@ -129,7 +192,8 @@ function normalizeCandidate(value: unknown): McpVideoCapabilities | null {
   }
   if (
     minSeconds === null || maxSeconds === null || maxUploadBytes === null ||
-    minSeconds > maxSeconds ||
+    maxCount === null || maxTotalSeconds === null ||
+    minSeconds > maxSeconds || maxTotalSeconds < minSeconds || maxTotalSeconds > maxSeconds ||
     (reference.tiers !== undefined && !tiers) ||
     (reference.resolutions !== undefined && !resolutions) ||
     (reference.resolutionsByTier !== undefined && !rawByTier) ||
@@ -151,11 +215,14 @@ function normalizeCandidate(value: unknown): McpVideoCapabilities | null {
       enabled: true,
       minSeconds,
       maxSeconds,
+      maxCount,
+      maxTotalSeconds,
       maxUploadBytes,
       ...(tiers ? { tiers } : {}),
       ...(resolutions ? { resolutions } : {}),
       ...(rawByTier ? { resolutionsByTier } : {}),
     },
+    referenceAudio,
     billing: { mode: billingMode, requestDefaultSeconds, referenceSeconds },
     requiresFirstFrame: raw.requiresFirstFrame,
   }
@@ -206,6 +273,8 @@ function legacyCapabilities(model: MeiGenModel): McpVideoCapabilities {
           enabled: true,
           minSeconds: LEGACY_REFERENCE_MIN_SECONDS,
           maxSeconds: LEGACY_REFERENCE_MAX_SECONDS,
+          maxCount: 1,
+          maxTotalSeconds: LEGACY_REFERENCE_MAX_SECONDS,
           maxUploadBytes: LEGACY_REFERENCE_MAX_UPLOAD_BYTES,
           ...(tiers?.length ? { tiers } : {}),
           ...(flatResolutions?.length ? { resolutions: flatResolutions } : {}),
@@ -213,7 +282,9 @@ function legacyCapabilities(model: MeiGenModel): McpVideoCapabilities {
             ? { resolutionsByTier }
             : {}),
         }
-      : { enabled: false, minSeconds: 0, maxSeconds: 0, maxUploadBytes: 0 },
+      : disabledReferenceVideo(),
+    // No legacy extra_config ever described reference audio; it arrives only as a declared field.
+    referenceAudio: disabledReferenceAudio(),
     billing: billingValid && defaultDuration !== undefined
       ? {
           mode: billingMode,

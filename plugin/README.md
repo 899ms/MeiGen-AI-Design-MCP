@@ -12,7 +12,7 @@ For composed MeiGen jobs, persist UUID `requestId` and exact inputs, use `wait: 
 
 ## Connect an MCP Server
 
-Choose one connection for this host. **Remote MCP provides 14 tools** for MeiGen generation, gallery and Skills. **Local npm MCP 2.0.0 provides 17**, adding prompt enhancement, local preferences and ComfyUI management. The local connection is needed for those plugin features and automatic local file preparation; remote MCP is the simplest option for cloud Skills.
+Choose one connection for this host. **Remote MCP provides 14 tools** for MeiGen generation, gallery and Skills. **Local npm MCP 2.0.1 provides 17**, adding prompt enhancement, local preferences and ComfyUI management. The local connection is needed for those plugin features and automatic local file preparation; remote MCP is the simplest option for cloud Skills.
 
 ### Remote — no npm install
 
@@ -37,7 +37,7 @@ Node.js 22 or newer is recommended. Add this server to your project's `.mcp.json
   "mcpServers": {
     "meigen": {
       "command": "npx",
-      "args": ["-y", "meigen@2.0.0"]
+      "args": ["-y", "meigen@2.0.1"]
     }
   }
 }
@@ -115,7 +115,7 @@ These commands belong to the Claude Code plugin; a bare MCP connection does not 
 
 | Problem | Next step |
 |---|---|
-| Tools not available | Restart/reconnect. Local: confirm `meigen@2.0.0`. Remote: refresh after backend deployment. npm installation alone does not deploy the APIs. |
+| Tools not available | Restart/reconnect. Local: confirm `meigen@2.0.1`. Remote: refresh after backend deployment. npm installation alone does not deploy the APIs. |
 | Invalid/missing MeiGen key | Check [desktop API Keys](https://www.meigen.ai/profile/api-keys), update connection credentials, and restart a local server. Keep the key out of chat. |
 | Insufficient credits | API calls only use purchased credits. Top up the same account through [Profile](https://www.meigen.ai/profile) or [mobile Premium](https://www.meigen.ai/m/premium), then ask to continue. Do not poll a rejected request. |
 | Image upload failed | Check format, size and source accessibility. Remote MCP cannot read a local path; use actual attachment bytes or a direct image URL. No generation started if upload failed. |
@@ -132,7 +132,7 @@ The OpenClaw manifest explicitly declares its MCP server and skills. Some CLI ve
 
 ## Publishing
 
-For maintainers, see [RELEASING.md](../RELEASING.md). `NPM_TOKEN` belongs in the repository's ignored `.env.local` for publishing; it is separate from the customer's `MEIGEN_API_TOKEN` and must not be committed or packaged. npm **2.0.0** is the package version, independent of the MCP protocol date and SDK version.
+For maintainers, see [RELEASING.md](../RELEASING.md). `NPM_TOKEN` belongs in the repository's ignored `.env.local` for publishing; it is separate from the customer's `MEIGEN_API_TOKEN` and must not be committed or packaged. npm **2.0.1** is the package version, independent of the MCP protocol date and SDK version.
 
 ## License
 

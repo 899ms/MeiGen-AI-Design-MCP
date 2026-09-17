@@ -110,6 +110,8 @@ export function registerListModels(server: McpServer, apiClient: MeiGenApiClient
             typeof referenceVideo?.maxUploadBytes === 'number'
               ? `; upload ≤${Math.floor(referenceVideo.maxUploadBytes / 1024 / 1024)}MB`
               : ''
+          const clips = (count: number) => `${count} clip${count === 1 ? '' : 's'}`
+          const referenceAudio = video.valid ? video.referenceAudio : null
           const tags = Array.isArray(cfg.tags) && cfg.tags.length > 0
             ? cfg.tags.join(', ')
             : null
@@ -128,7 +130,10 @@ export function registerListModels(server: McpServer, apiClient: MeiGenApiClient
             `   Ratios: ${m.supported_ratios.join(', ')}`,
             cost ? `   Cost: ${cost}` : '',
             referenceVideo?.enabled
-              ? `   Reference video: ${referenceVideo.minSeconds}–${referenceVideo.maxSeconds}s${referenceVideo.tiers ? `; tiers ${referenceVideo.tiers.join(', ')}` : ''}${referenceResolutionDetail ? `; resolutions ${referenceResolutionDetail}` : ''}${referenceUploadLimit} (server probes duration)`
+              ? `   Reference video: ${referenceVideo.minSeconds}–${referenceVideo.maxSeconds}s per clip; up to ${clips(referenceVideo.maxCount)}, ${referenceVideo.maxTotalSeconds}s total${referenceVideo.tiers ? `; tiers ${referenceVideo.tiers.join(', ')}` : ''}${referenceResolutionDetail ? `; resolutions ${referenceResolutionDetail}` : ''}${referenceUploadLimit} (server probes duration)`
+              : '',
+            referenceAudio?.enabled
+              ? `   Reference audio: ${referenceAudio.minSeconds}–${referenceAudio.maxSeconds}s per clip; up to ${clips(referenceAudio.maxCount)}, ${referenceAudio.maxTotalSeconds}s total; ${referenceAudio.formats.join('/')}; ≤${Math.floor(referenceAudio.maxUploadBytes / 1024 / 1024)}MB each${referenceAudio.requiresVisualReference ? ' (requires at least one reference image or reference video)' : ''}; audio seconds are not billed`
               : '',
             video.valid && video.requiresFirstFrame ? '   First frame: Required' : '',
             !video.valid ? '   Video settings: temporarily unavailable' : '',

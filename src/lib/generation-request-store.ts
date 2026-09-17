@@ -13,10 +13,19 @@ export interface GenerationReceipt {
   requestId: string
   fingerprint: string
   references?: string[]
+  /** Reference VIDEO URLs, published write-once alongside (never inside) references.json. */
+  videoReferences?: string[]
+  /** Reference AUDIO URLs, published write-once alongside (never inside) references.json. */
+  audioReferences?: string[]
   generationId?: string
   modelId?: string
   creditsUsed?: number
 }
+/** Additive write-once receipt files. references.json keeps its exact historical shape. */
+const MEDIA_RECEIPTS = [
+  { field: 'videoReferences', file: 'video-references.json' },
+  { field: 'audioReferences', file: 'audio-references.json' },
+] as const satisfies ReadonlyArray<{ field: 'videoReferences' | 'audioReferences'; file: string }>
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const localLocks = new Map<string, { semaphore: Semaphore; users: number }>()
 const memoryReceipts = new Map<string, GenerationReceipt>()
@@ -27,7 +36,10 @@ function canUseMemory(error: unknown): boolean {
 }
 function remember(key: string, receipt: GenerationReceipt) {
   memoryReceipts.delete(key)
-  memoryReceipts.set(key, { ...receipt, ...(receipt.references ? { references: [...receipt.references] } : {}) })
+  memoryReceipts.set(key, { ...receipt,
+    ...(receipt.references ? { references: [...receipt.references] } : {}),
+    ...(receipt.videoReferences ? { videoReferences: [...receipt.videoReferences] } : {}),
+    ...(receipt.audioReferences ? { audioReferences: [...receipt.audioReferences] } : {}) })
   if (memoryReceipts.size > 256) memoryReceipts.delete(memoryReceipts.keys().next().value!)
 }
 function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException)?.code === 'ENOENT' }
@@ -107,6 +119,13 @@ export async function withGenerationReceipt<T>(config: MeiGenConfig, requestId: 
         if (!Array.isArray(references.references) || references.references.some(value => typeof value !== 'string')) throw new GenerationError('Stored reference URLs are invalid.', 'invalid_receipt')
         receipt.references = references.references
       } catch (error) { if (!missing(error)) throw error }
+      for (const media of MEDIA_RECEIPTS) {
+        try {
+          const stored = await readPrivate<{ references: string[] }>(join(directory, media.file))
+          if (!Array.isArray(stored.references) || stored.references.some(value => typeof value !== 'string')) throw new GenerationError('Stored reference URLs are invalid.', 'invalid_receipt')
+          receipt[media.field] = stored.references
+        } catch (error) { if (!missing(error)) throw error }
+      }
       try {
         const job = await readPrivate<{ generationId: string; modelId?: string; creditsUsed?: number }>(join(directory, 'job.json'))
         if (typeof job.generationId !== 'string' || !job.generationId) throw new GenerationError('Stored job identity is invalid.', 'invalid_receipt')
@@ -121,6 +140,13 @@ export async function withGenerationReceipt<T>(config: MeiGenConfig, requestId: 
           // Cross-process immutable publication selects the URLs; the backend arbitrates paid identity.
           if (!Array.isArray(winner.references) || winner.references.some(value => typeof value !== 'string')) throw new GenerationError('Stored reference URLs are invalid.', 'invalid_receipt')
           receipt.references = winner.references
+        }
+        for (const media of MEDIA_RECEIPTS) {
+          const pending = receipt[media.field]
+          if (!pending) continue
+          const winner = await publishOnce(join(directory, media.file), { references: pending })
+          if (!Array.isArray(winner.references) || winner.references.some(value => typeof value !== 'string')) throw new GenerationError('Stored reference URLs are invalid.', 'invalid_receipt')
+          receipt[media.field] = winner.references
         }
         if (receipt.generationId) {
           const winner = await publishOnce(join(directory, 'job.json'), { generationId: receipt.generationId, modelId: receipt.modelId, creditsUsed: receipt.creditsUsed })

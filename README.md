@@ -32,6 +32,8 @@
 
 ---
 
+> **New in 2.0.1:** `generate_video` accepts multiple reference videos and reference audio (`referenceVideos` / `referenceAudios`; local `.mp4/.mov/.wav/.mp3` files are uploaded automatically). Per-model limits come from `list_models`.
+>
 > **New in 2.0.0:** five guided ecommerce/image Skills, original-image enhancement, upload validation, request recovery and Codex setup. [Use a Skill](#skills) · [Upgrade guide](#upgrading) · [HTTP API](SKILLS_API.md)
 
 ## What Is This?
@@ -102,7 +104,7 @@ codex mcp add meigen --url https://www.meigen.ai/api/mcp
 Add bearer_token_env_var = "MEIGEN_API_TOKEN" only after that local
 environment variable is configured; otherwise leave authentication unset.
 If I need automatic local-file preparation, ComfyUI, or local-only tools, use
-the stdio command npx -y meigen@2.0.0 instead. Check that this exact npm
+the stdio command npx -y meigen@2.0.1 instead. Check that this exact npm
 version exists before configuring it; report an unavailable version.
 Guide me to enter my MeiGen key in local credentials settings or the launch
 environment, never in this chat. Public lookups can be tested without a key.
@@ -124,7 +126,7 @@ You can browse inspiration and inspect models or Skill prices without a key. To 
 
 ### 2. Choose one connection
 
-| | Remote MCP — recommended | Local npm MCP 2.0.0 |
+| | Remote MCP — recommended | Local npm MCP 2.0.1 |
 |---|---|---|
 | Connection | Streamable HTTP at `https://www.meigen.ai/api/mcp` | Node.js process over stdio |
 | Tools | 14: MeiGen generation, gallery and the five Skills | The same 14, plus prompt enhancement, preferences and ComfyUI management |
@@ -238,13 +240,13 @@ Set `MEIGEN_API_TOKEN` locally in the environment that **launches Codex** before
 ```toml
 [mcp_servers.meigen]
 command = "npx"
-args = ["-y", "meigen@2.0.0"]
+args = ["-y", "meigen@2.0.1"]
 env_vars = ["MEIGEN_API_TOKEN"]
 startup_timeout_sec = 90
 tool_timeout_sec = 240
 ```
 
-This forwards your locally configured `MEIGEN_API_TOKEN` to the npm process. To register just the local command with the CLI, use `codex mcp add meigen -- npx -y meigen@2.0.0`, then add the environment forwarding and timeout settings shown above. `meigen init codex` is not supported; use Codex's own MCP configuration.
+This forwards your locally configured `MEIGEN_API_TOKEN` to the npm process. To register just the local command with the CLI, use `codex mcp add meigen -- npx -y meigen@2.0.1`, then add the environment forwarding and timeout settings shown above. `meigen init codex` is not supported; use Codex's own MCP configuration.
 
 Restart/reconnect after setup. In Codex CLI, `codex mcp list` checks registration and `/mcp` shows connection status. Then ask **“List MeiGen's available Skills and current prices”** to verify an actual tool call without generating or spending credits. A saved configuration alone does not prove that the server connected. Longer video jobs may need a longer tool timeout.
 
@@ -258,7 +260,7 @@ For accounts and workspaces with custom MCP access, enable **Developer mode**, c
 
 ### Local npm MCP (Node.js)
 
-Node.js 22 or newer is recommended. The examples below pin **meigen@2.0.0**. After changing an installed version or connection settings, restart or reconnect the host. The five Skills still call MeiGen Cloud and need the account setup above.
+Node.js 22 or newer is recommended. The examples below pin **meigen@2.0.1**. After changing an installed version or connection settings, restart or reconnect the host. The five Skills still call MeiGen Cloud and need the account setup above.
 
 <a id="claude-code"></a>
 
@@ -283,7 +285,7 @@ Node.js 22 or newer is recommended. The examples below pin **meigen@2.0.0**. Aft
 
 > This marketplace doesn't bundle MCP server config. After installing, add to your project's `.mcp.json`:
 > ```json
-> { "mcpServers": { "meigen": { "command": "npx", "args": ["-y", "meigen@2.0.0"] } } }
+> { "mcpServers": { "meigen": { "command": "npx", "args": ["-y", "meigen@2.0.1"] } } }
 > ```
 
 #### First-Time Setup
@@ -307,16 +309,16 @@ For the five Skills, choose **MeiGen Cloud** and configure your MeiGen key in th
 One command to set up MeiGen for any supported AI coding tool:
 
 ```bash
-npx -y meigen@2.0.0 init cursor      # Cursor
-npx -y meigen@2.0.0 init vscode      # VS Code / GitHub Copilot
-npx -y meigen@2.0.0 init windsurf    # Windsurf
-npx -y meigen@2.0.0 init roo         # Roo Code
-npx -y meigen@2.0.0 init claude      # Claude Code (project-level)
+npx -y meigen@2.0.1 init cursor      # Cursor
+npx -y meigen@2.0.1 init vscode      # VS Code / GitHub Copilot
+npx -y meigen@2.0.1 init windsurf    # Windsurf
+npx -y meigen@2.0.1 init roo         # Roo Code
+npx -y meigen@2.0.1 init claude      # Claude Code (project-level)
 ```
 
 This writes the correct MCP config file with the right format and path for your tool. If a config file already exists, MeiGen is merged in without overwriting your other servers.
 
-`init` writes a configuration that follows the default npm release tag; the manual examples above pin 2.0.0. To pin an initialized connection too, change its `args` to `["-y", "meigen@2.0.0"]` and restart the host.
+`init` writes a configuration that follows the default npm release tag; the manual examples above pin 2.0.1. To pin an initialized connection too, change its `args` to `["-y", "meigen@2.0.1"]` and restart the host.
 
 <a id="openclaw"></a>
 
@@ -343,19 +345,19 @@ For shell scripts, CI pipelines, or anyone who wants AI image generation without
 export MEIGEN_API_TOKEN=meigen_sk_...
 
 # Generate
-npx -y meigen@2.0.0 gen --prompt "a calico cat in a sunlit kitchen"
+npx -y meigen@2.0.1 gen --prompt "a calico cat in a sunlit kitchen"
 
 # With a specific model + aspect ratio
-npx -y meigen@2.0.0 gen -p "tech logo" -m midjourney-v8.1 -r 1:1
+npx -y meigen@2.0.1 gen -p "tech logo" -m midjourney-v8.1 -r 1:1
 
 # With a reference image (local file auto-uploaded)
-npx -y meigen@2.0.0 gen -p "product hero shot" --ref ~/Desktop/bottle.jpg
+npx -y meigen@2.0.1 gen -p "product hero shot" --ref ~/Desktop/bottle.jpg
 
 # Submit only — print generationId without polling (good for CI)
-npx -y meigen@2.0.0 gen -p "..." --no-wait
+npx -y meigen@2.0.1 gen -p "..." --no-wait
 
 # Machine-readable output (good for jq pipes)
-npx -y meigen@2.0.0 gen -p "..." --json | jq -r '.imageUrls[0]'
+npx -y meigen@2.0.1 gen -p "..." --json | jq -r '.imageUrls[0]'
 ```
 
 CLI image output is saved to `~/Pictures/meigen/` (override with `MEIGEN_OUTPUT_DIR`). The five Skills return result links; your host can preview or download them.
@@ -371,7 +373,7 @@ Add to your MCP config (e.g. `.mcp.json`, `claude_desktop_config.json`):
   "mcpServers": {
     "meigen": {
       "command": "npx",
-      "args": ["-y", "meigen@2.0.0"],
+      "args": ["-y", "meigen@2.0.1"],
       "env": {
         "MEIGEN_API_TOKEN": "meigen_sk_..."
       }
@@ -390,7 +392,7 @@ Add to your MCP config (e.g. `.mcp.json`, `claude_desktop_config.json`):
 mcp_servers:
   meigen:
     command: "npx"
-    args: ["-y", "meigen@2.0.0"]
+    args: ["-y", "meigen@2.0.1"]
     env:
       MEIGEN_API_TOKEN: "meigen_sk_..."
     timeout: 2700         # generate_video polls until the server reports a terminal state (long videos can run 15+ min) — default 120s is not enough
@@ -405,7 +407,7 @@ mcp_servers:
 
 ### Compose with an existing workflow
 
-An upstream Skill can write N scripts, call MeiGen for each first frame, then pass completed frame URLs to `generate_video(firstFrame=...)`. It owns prompts, models/providers, ratios, approved count/budget and presentation. Creative planning and plugin agents are optional; resolved requests do not need repeated approval at every step.
+An upstream Skill can write N scripts, call MeiGen for each first frame, then pass completed frame URLs to `generate_video(firstFrame=...)`. Reference clips (`referenceVideos`, `referenceAudios`) can be mixed in the same call and addressed from the prompt as "Video 1" / "Audio 1". It owns prompts, models/providers, ratios, approved count/budget and presentation. Creative planning and plugin agents are optional; resolved requests do not need repeated approval at every step.
 
 For MeiGen jobs, persist one UUID `requestId` and exact inputs per logical step. Use `wait: false` for an immediate task handle; local npm also accepts `download: false`. Existing local defaults remain `wait: true`, `download: true`; asynchronous calls skip download. Remote MCP returns URLs and has no download setting. Recover with `check_generation` using the original `requestId` or `generationId`. Request lookup requires a MeiGen key belonging to the same account; known generation-ID status remains public remotely. Read `structuredContent` for status, handles, URLs, errors and polling advice.
 
@@ -421,11 +423,11 @@ Both entries expose the following 14 cloud tools. The local npm entry adds three
 
 | Tool | Entry | Billing / purpose |
 |---|---|---|
-| `search_gallery` | Both | No generation charge; search inspiration with image previews. Local npm also bundles 1,446 prompts. |
+| `search_gallery` | Both | No generation charge; search inspiration with image previews, at most 3 per call. With a MeiGen key configured the call is authenticated and counts against that account's daily search quota instead of the shared per-IP budget. Local npm also bundles 1,446 prompts. |
 | `get_inspiration` | Both | No generation charge; full prompt, images and metadata for a gallery entry. |
 | `list_models` | Both | No generation charge; current supported models and options. |
 | `generate_image` | Both | Generate an image. Remote uses MeiGen purchased credits; local also supports configured BYOK/ComfyUI providers. |
-| `generate_video` | Both | MeiGen key and purchased credits; use the current model options from `list_models`. |
+| `generate_video` | Both | MeiGen key and purchased credits; use the current model options from `list_models`. Reference clips go in `referenceVideos` / `referenceAudios` (`images.meigen.ai` URLs — normally a clip MeiGen generated earlier — or, on the local npm server only, local `.mp4`/`.mov`/`.wav`/`.mp3` files that are uploaded for you; remote MCP takes `images.meigen.ai` URLs only, and other hosts are rejected); per-model clip counts and second budgets come from `list_models`, and reference audio is never billed. |
 | `check_generation` | Both | No generation charge; recover by generationId or authenticated requestId. |
 | `list_skills` | Both | No key or generation charge; current Skill inputs, defaults and prices. |
 | `upload_skill_image` | Both | MeiGen key; prepares a reference without spending generation credits. |
@@ -458,8 +460,8 @@ For shell scripts, CI pipelines, and terminal users who don't run an MCP host:
 
 ```bash
 export MEIGEN_API_TOKEN=meigen_sk_...
-npx -y meigen@2.0.0 gen --prompt "a calico cat in a sunlit kitchen"
-npx -y meigen@2.0.0 gen -p "logo design" -m midjourney-v8.1 -r 1:1 --json
+npx -y meigen@2.0.1 gen --prompt "a calico cat in a sunlit kitchen"
+npx -y meigen@2.0.1 gen -p "logo design" -m midjourney-v8.1 -r 1:1 --json
 ```
 
 See [Use as CLI (no MCP host required)](#use-as-cli-no-mcp-host-required) for the full flag list.
@@ -613,7 +615,7 @@ The `presignedUrl` is used for a `PUT` upload, and `publicUrl` is the publicly a
 
 | Problem | Next step |
 |---|---|
-| New Skills do not appear | Remote: refresh/reconnect the tool list after the backend is deployed. Local: confirm the connection runs `meigen@2.0.0`, then restart. Installing npm alone does not deploy the APIs. |
+| New Skills do not appear | Remote: refresh/reconnect the tool list after the backend is deployed. Local: confirm the connection runs `meigen@2.0.1`, then restart. Installing npm alone does not deploy the APIs. |
 | Invalid or missing key | Create/check the key in [desktop API Keys](https://www.meigen.ai/profile/api-keys) and update the MCP connection's header or `MEIGEN_API_TOKEN`. Restart a local server after changing its environment. Do not paste the key into chat. |
 | Insufficient credits, but the website shows a balance | API calls use **purchased credits only**, never daily free credits. Use [Profile → Top Up](https://www.meigen.ai/profile) on the same account; then ask the assistant to continue. A rejected call should not be polled. |
 | The image cannot be uploaded | Use a real local file (local npm) or a public direct HTTPS image link. Check format/size and remove login or redirect requirements. If the host cannot read attachments, use a direct link. Upload failure has not started a generation. |
@@ -629,7 +631,7 @@ For Skill client implementers: generate `requestId` internally, keep it with the
 ## Upgrading from 1.4.0
 
 - **Remote MCP:** keep the endpoint and your valid MeiGen key. After backend deployment, reconnect and call `list_skills`; expect five Skills and 14 tools. Updating npm alone does not deploy the APIs.
-- **Local npm:** change pinned configurations to `meigen@2.0.0` and restart; global installations can run `npm install -g meigen@2.0.0`. Expect 17 tools. Check that the version is available on npm first.
+- **Local npm:** change pinned configurations to `meigen@2.0.1` and restart; global installations can run `npm install -g meigen@2.0.1`. Expect 17 tools. Check that the version is available on npm first.
 - **Plugin users:** update the Claude marketplace plugin, OpenClaw native plugin or standalone ClawHub Skill separately. Updating npm alone does not replace installed instruction files. Do not add a second MCP entry when the plugin already supplies one.
 - **Composable calls:** local `wait: true` / `download: true` remain defaults. New workflows should persist UUID `requestId`, use `wait: false` and recover by that ID. Remote legacy `attemptId` remains accepted; older receipts cannot retroactively prove every historical parameter mismatch. Update plugin instructions as well as the server to get the optional creative flow.
 - **Existing configuration and jobs:** general generation keeps its MeiGen/OpenAI/ComfyUI configuration; the five Skills need a MeiGen key and purchased credits. Preserve IDs and inputs for interrupted jobs and recover them; an upgrade is not a reason to resubmit a paid request.
@@ -637,9 +639,9 @@ For Skill client implementers: generate `requestId` internally, keep it with the
 
 ## Releasing
 
-The npm package version **2.0.0** is separate from the MCP protocol date and SDK version.
+The npm package version **2.0.1** is separate from the MCP protocol date and SDK version.
 
-Maintainers: follow [RELEASING.md](https://github.com/jau123/MeiGen-AI-Design-MCP/blob/main/RELEASING.md) for the 2.0.0 build, package checks and publishing process. Store `NPM_TOKEN` only in this repository's ignored `.env.local` as described there. It authorizes npm publishing and is separate from the `MEIGEN_API_TOKEN` used by customers. Never include either credential in commits or the published package.
+Maintainers: follow [RELEASING.md](https://github.com/jau123/MeiGen-AI-Design-MCP/blob/main/RELEASING.md) for the 2.0.1 build, package checks and publishing process. Store `NPM_TOKEN` only in this repository's ignored `.env.local` as described there. It authorizes npm publishing and is separate from the `MEIGEN_API_TOKEN` used by customers. Never include either credential in commits or the published package.
 
 ## License
 

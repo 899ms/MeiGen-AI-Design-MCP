@@ -1,6 +1,6 @@
 {
   "name": "meigen",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Composable image and video generation tools, reusable visual skills, and optional creative workflows for MCP clients",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

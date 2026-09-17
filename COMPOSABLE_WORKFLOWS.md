@@ -4,7 +4,7 @@
 
 Use MeiGen as a callable step inside an existing agent, Skill, script or application. The caller owns the creative plan, prompts, model/provider choices, output count, approved budget, scheduling and presentation. Optional MeiGen creative assistants can help develop a brief; they are not required before calling tools. Discovery can support any workflow. A resolved upstream plan does not need another approval for every frame, clip or batch.
 
-Requires local **`meigen@2.0.0` or later** (`npx -y meigen@2.0.0`), or the updated remote endpoint **`https://www.meigen.ai/api/mcp`**. npm 1.4.0 does not implement this contract. Release order is backend deployment, npm publication, then public installation guides; until 2.0.0 is published, validate a locally built package. Reconnect and inspect the installed schemas for `requestId`, `wait` and request lookup. Backend rollbacks must preserve recovery endpoints and the durable POST contract; users do not need to withdraw already installed npm packages.
+Requires local **`meigen@2.0.1` or later** (`npx -y meigen@2.0.1`; 2.0.0 lacks `referenceVideos` / `referenceAudios`), or the updated remote endpoint **`https://www.meigen.ai/api/mcp`**. npm 1.4.0 does not implement this contract. Release order is backend deployment, npm publication, then public installation guides; until 2.0.1 is published, validate a locally built package. Reconnect and inspect the installed schemas for `requestId`, `wait` and request lookup. Backend rollbacks must preserve recovery endpoints and the durable POST contract; users do not need to withdraw already installed npm packages.
 
 ## Ordinary task contract
 
@@ -88,12 +88,17 @@ const frameStatus = await client.callTool({
 
 ```js
 // selectedFrameUrl is a completed URL saved in this video's exact input.
+// Reference clips are addressed from the prompt as "Video N" / "Audio N", numbered per kind in
+// the order supplied below. Per-model clip counts and second budgets come from list_models;
+// billing counts the summed input VIDEO seconds, and reference audio is free.
 const video = await client.callTool({
   name: 'generate_video',
   arguments: {
     ...plan.videoSettings, // Includes the caller-selected live model.
-    prompt: script.videoPrompt,
+    prompt: `Extend this footage: ${script.videoPrompt} Keep the camera move of Video 1 and the rhythm of Audio 1.`,
     firstFrame: script.selectedFrameUrl,
+    referenceVideos: [script.referenceClipUrl, '/Users/me/clips/pan.mp4'], // images.meigen.ai URLs pass through; local file paths work on the local npm server only (remote MCP takes images.meigen.ai URLs).
+    referenceAudios: ['/Users/me/audio/theme.mp3'],
     requestId: script.videoRequestId,
     wait: false,
     download: false, // Local npm only; omit for remote MCP.

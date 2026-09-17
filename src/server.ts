@@ -29,7 +29,7 @@ const SERVER_INSTRUCTIONS = `MeiGen provides image and video tools that can be c
 
 ## Ordinary image and video tasks
 
-- generate_image creates an image; generate_video creates a clip. For video, a model is required. Use list_models for supported duration, tier, resolution and reference inputs. A first-frame image is passed as firstFrame, not referenceImages; lastFrame requires firstFrame. Reference-video continuation produces new footage only, not a concatenated edit.
+- generate_image creates an image; generate_video creates a clip. For video, a model is required. Use list_models for supported duration, tier, resolution and reference inputs. A first-frame image is passed as firstFrame, not referenceImages; lastFrame requires firstFrame. Reference clips are passed as the referenceVideos and referenceAudios arrays (images.meigen.ai URLs, typically clips MeiGen generated earlier, or local files which are uploaded for you — any other host is rejected before charging), and a prompt can point at a specific one as "Video 1" or "Audio 1" in the order supplied; per-model clip counts, second budgets and audio formats come from list_models, some models require a reference image or video before any audio, and reference audio is never billed. Reference-video continuation produces new footage only, not a concatenated edit.
 - For composed MeiGen jobs, persist a caller-generated UUID requestId and the exact inputs for every logical image/video step before calling the tool. Use wait=false to submit and return a task handle, and download=false on local npm when only URLs are needed. wait=true and download=true remain the local legacy defaults; download is skipped when wait=false. Remote MCP returns URLs without local downloads. Use the installed tool schema for transport-specific fields and non-MeiGen provider support.
 - Recover with check_generation using the original generationId or requestId. Follow structured status, nextAction and polling hints. A processing/unknown/error response is not a completed artifact. A timeout or transport failure is not permission to create a new request ID. Verify the original attempt before any retry; preserve its ID and inputs. An input conflict must not be bypassed by silently generating a new ID.
 - Schedule independent, already-authorized jobs with bounded concurrency. Local npm permits at most four API submissions at once; polling/downloads do not occupy those submission slots. Its ComfyUI executor runs one job at a time. These are local controls, not a promise about backend capacity. Respect actual rate-limit responses and Retry-After. There is no blanket prohibition on parallel videos or a ten-image workflow limit.
@@ -47,7 +47,7 @@ Use the original imageUrl for upscale_image (PNG/JPEG/WebP, at most 64 MiB / 64 
 
 ${SKILL_ACCOUNT_GUIDE.authentication} Create keys: ${SKILL_ACCOUNT_GUIDE.apiKeysUrl}. ${SKILL_ACCOUNT_GUIDE.credits} Top up: ${SKILL_ACCOUNT_GUIDE.topUpUrl}; mobile: ${SKILL_ACCOUNT_GUIDE.mobileTopUpUrl}.
 
-Remote Streamable HTTP uses https://www.meigen.ai/api/mcp with Authorization: Bearer <MeiGen API key> in private host connection settings. Local npm uses npx -y meigen@2.0.0 with MEIGEN_API_TOKEN in the MCP server environment or existing private ~/.config/meigen/config.json. Reconnect after changes. Never request or expose credentials in chat. Only the Claude Code plugin adds /meigen:setup.
+Remote Streamable HTTP uses https://www.meigen.ai/api/mcp with Authorization: Bearer <MeiGen API key> in private host connection settings. Local npm uses npx -y meigen@2.0.1 with MEIGEN_API_TOKEN in the MCP server environment or existing private ~/.config/meigen/config.json. Reconnect after changes. Never request or expose credentials in chat. Only the Claude Code plugin adds /meigen:setup.
 
 Public discovery does not require a key. Local prompt enhancement and preferences do not require a MeiGen key either. Discovery success verifies connectivity, not paid credentials or balance. For ordinary image generation, use the caller's configured MeiGen, OpenAI-compatible or ComfyUI provider.
 
@@ -61,7 +61,7 @@ export function createServer(config = loadConfig()) {
   const apiClient = new MeiGenApiClient(config)
 
   const server = new McpServer(
-    { name: 'meigen', version: '2.0.0' },
+    { name: 'meigen', version: '2.0.1' },
     { instructions: SERVER_INSTRUCTIONS },
   )
 

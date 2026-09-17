@@ -158,3 +158,119 @@ test('list_models production code uses the cache-compatible helper', async () =>
   assert.match(listModels, /may be per-second or per-call/);
   assert.doesNotMatch(listModels, /Pricing is per-second/);
 });
+
+const declaredBase = {
+  valid: true,
+  outputDuration: { kind: 'range', min: 4, max: 15, step: 1, default: 4 },
+  billing: { mode: 'per_second', requestDefaultSeconds: 4, referenceSeconds: 'reference_plus_output' },
+  requiresFirstFrame: false,
+};
+
+const enabledVideo = {
+  enabled: true,
+  minSeconds: 2,
+  maxSeconds: 15,
+  maxUploadBytes: 50 * 1024 * 1024,
+};
+
+test('reference video without the additive fields keeps the historical single-clip contract', () => {
+  const capability = videoCapabilitiesForModel({
+    ...baseModel,
+    extra_config: { pricingPerSec: { '480p': 16 } },
+    capabilities: { video: { ...declaredBase, referenceVideo: enabledVideo } },
+  });
+
+  assert.equal(capability.valid, true);
+  assert.equal(capability.referenceVideo.maxCount, 1);
+  assert.equal(capability.referenceVideo.maxTotalSeconds, 15);
+  assert.equal(capability.referenceAudio.enabled, false);
+});
+
+test('declared clip count and total-seconds budget are parsed for a multi-clip model', () => {
+  const capability = videoCapabilitiesForModel({
+    ...baseModel,
+    extra_config: { pricingPerSec: { '480p': 16 } },
+    capabilities: {
+      video: {
+        ...declaredBase,
+        referenceVideo: { ...enabledVideo, maxSeconds: 30, maxCount: 10, maxTotalSeconds: 30 },
+        referenceAudio: {
+          enabled: true, minSeconds: 2, maxSeconds: 30, maxCount: 10, maxTotalSeconds: 30,
+          maxUploadBytes: 15 * 1024 * 1024, formats: ['WAV', 'mp3'], requiresVisualReference: false,
+        },
+      },
+    },
+  });
+
+  assert.equal(capability.referenceVideo.maxCount, 10);
+  assert.equal(capability.referenceVideo.maxTotalSeconds, 30);
+  assert.deepEqual(capability.referenceAudio, {
+    enabled: true, minSeconds: 2, maxSeconds: 30, maxCount: 10, maxTotalSeconds: 30,
+    maxUploadBytes: 15 * 1024 * 1024, formats: ['wav', 'mp3'], requiresVisualReference: false,
+  });
+});
+
+test('a malformed additive field fails closed instead of silently restoring a 1-clip cap', () => {
+  for (const referenceVideo of [
+    { ...enabledVideo, maxCount: 0 },
+    { ...enabledVideo, maxCount: '3' },
+    { ...enabledVideo, maxTotalSeconds: 20 }, // above the per-clip maximum the billing RPC checks
+  ]) {
+    const capability = videoCapabilitiesForModel({
+      ...baseModel,
+      extra_config: { durations: [4], defaultDuration: 4, pricingPerSec: { '480p': 16 } },
+      capabilities: { video: { ...declaredBase, referenceVideo } },
+    });
+    assert.equal(capability.valid, false, JSON.stringify(referenceVideo));
+  }
+});
+
+test('reference audio is independent of the video billing contract', () => {
+  // The vendor bills input VIDEO seconds only, so audio must never be gated on
+  // billing.referenceSeconds — a model can offer audio with reference video disabled.
+  const capability = videoCapabilitiesForModel({
+    ...baseModel,
+    extra_config: { pricingPerSec: { '480p': 16 } },
+    capabilities: {
+      video: {
+        ...declaredBase,
+        billing: { mode: 'per_second', requestDefaultSeconds: 4 },
+        referenceVideo: { enabled: false, minSeconds: 0, maxSeconds: 0, maxUploadBytes: 0 },
+        referenceAudio: {
+          enabled: true, minSeconds: 2, maxSeconds: 15, maxCount: 3, maxTotalSeconds: 15,
+          maxUploadBytes: 15 * 1024 * 1024, formats: ['wav', 'mp3'], requiresVisualReference: true,
+        },
+      },
+    },
+  });
+
+  assert.equal(capability.valid, true);
+  assert.equal(capability.referenceVideo.enabled, false);
+  assert.equal(capability.referenceAudio.enabled, true);
+  assert.equal(capability.referenceAudio.requiresVisualReference, true);
+});
+
+test('a malformed reference-audio node fails the capability closed', () => {
+  for (const referenceAudio of [
+    { enabled: true },
+    { enabled: 'yes', minSeconds: 2, maxSeconds: 15, maxCount: 3, maxTotalSeconds: 15, maxUploadBytes: 1, formats: ['wav'], requiresVisualReference: false },
+    { enabled: true, minSeconds: 2, maxSeconds: 15, maxCount: 3, maxTotalSeconds: 15, maxUploadBytes: 1, formats: [], requiresVisualReference: false },
+    { enabled: true, minSeconds: 2, maxSeconds: 15, maxCount: 2, maxTotalSeconds: 40, maxUploadBytes: 1, formats: ['wav'], requiresVisualReference: false },
+  ]) {
+    const capability = videoCapabilitiesForModel({
+      ...baseModel,
+      extra_config: { durations: [4], defaultDuration: 4, pricingPerSec: { '480p': 16 } },
+      capabilities: { video: { ...declaredBase, referenceVideo: enabledVideo, referenceAudio } },
+    });
+    assert.equal(capability.valid, false, JSON.stringify(referenceAudio));
+  }
+});
+
+test('list_models renders the clip budgets and the reference-audio line', async () => {
+  const listModels = await readFile(new URL('../tools/list-models.ts', import.meta.url), 'utf8');
+  assert.match(listModels, /up to \$\{clips\(referenceVideo\.maxCount\)\}, \$\{referenceVideo\.maxTotalSeconds\}s total/);
+  assert.match(listModels, /Reference audio: /);
+  assert.match(listModels, /referenceAudio\.formats\.join\('\/'\)/);
+  assert.match(listModels, /requires at least one reference image or reference video/);
+  assert.match(listModels, /audio seconds are not billed/);
+});

@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, readdir, writeFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,6 +8,8 @@ import sharp from 'sharp'
 import apiModule from '../lib/meigen-api.js'
 import operationModule from '../lib/generation-operation.js'
 import contractModule from '../lib/generation-contract.js'
+import uploadModule from '../lib/upload.js'
+import referencesModule from '../lib/generation-references.js'
 import httpModule from '../lib/generation-http.js'
 import comfyModule from '../lib/providers/comfyui.js'
 const { MeiGenApiClient } = apiModule
@@ -201,3 +203,190 @@ test('ComfyUI tolerates a query timeout, resets consecutive errors after a valid
   await assert.rejects(comfyScenario(() => { polls++; return new Response(null, { status: 403 }) }), error => error.httpStatus === 403)
   assert.equal(polls, 1)
 })
+
+test('an upload failure before submission never tells the caller to check a generation', () => {
+  const { preSubmitError } = operationModule
+  const { errorOutput } = contractModule
+  const { ImageUploadError } = uploadModule
+  const expected = { 401: 'configure_auth', 403: 'configure_auth', 402: 'top_up', 400: 'resolve_error', 413: 'resolve_error', 503: 'retry_request', 500: 'retry_request' }
+  for (const [status, type] of Object.entries(expected)) {
+    const output = errorOutput(preSubmitError(new ImageUploadError(`upload failed ${status}`, Number(status))), { requestId: 'f2c4d7c1-1111-4222-8333-444455556666', provider: 'meigen' })
+    assert.equal(output.nextAction.type, type, `status ${status}`)
+    assert.notEqual(output.nextAction.type, 'check_generation')
+    assert.equal(output.status, 'error')
+    assert.equal(output.error.code === 'request_interrupted', false, `status ${status} must not be reported as an interrupted submission`)
+  }
+  // 非上传错误原样透传
+  const plain = new Error('other')
+  assert.equal(preSubmitError(plain) instanceof contractModule.GenerationError, true)
+  // PUT 403 = 签名 URL / 存储侧拒绝,不是 Key 无效:同 ID 重试上传
+  assert.equal(errorOutput(preSubmitError(new ImageUploadError('put denied', 403, 'put')), { requestId: 'f2c4d7c1-1111-4222-8333-444455556666', provider: 'meigen' }).nextAction.type, 'retry_request')
+})
+
+test('a missing local reference path never produces a POST or a check_generation hint', () => isolated(async () => {
+  const requestId = randomUUID()
+  let posts = 0
+  globalThis.fetch = async (_url, init) => { if ((init?.method ?? 'GET') === 'POST') posts++; return Response.json({ success: true, generationId: 'never' }) }
+  const cases = [
+    ['image', { prompt: 'x', referenceImages: ['/nonexistent/meigen-missing.png'], requestId, wait: false }],
+    ['video', { prompt: 'x', modelId: 'seedance-2-5', referenceVideos: ['/nonexistent/meigen-missing.mp4'], requestId, wait: false }],
+    ['video', { prompt: 'x', modelId: 'seedance-2-5', referenceAudios: ['/nonexistent/meigen-missing.mp3'], requestId, wait: false }],
+  ]
+  for (const [mediaType, input] of cases) {
+    const output = await runMeiGenGeneration(mediaType, input, client(), config)
+    assert.equal(output.success, false)
+    assert.equal(output.error.code, 'invalid_reference', `${mediaType} ${JSON.stringify(input)}`)
+    assert.equal(output.nextAction.type, 'resolve_error')
+    assert.notEqual(output.nextAction.type, 'check_generation')
+    assert.equal(output.status, 'error')
+  }
+  assert.equal(posts, 0)
+}))
+
+test('cancellation before submission stops without a check_generation hint', () => isolated(async () => {
+  let posts = 0
+  globalThis.fetch = async (_url, init) => { if ((init?.method ?? 'GET') === 'POST') posts++; return Response.json({ success: true, generationId: 'never' }) }
+  const output = await runMeiGenGeneration('image', { prompt: 'x', requestId: randomUUID(), wait: false }, client(), config, AbortSignal.abort())
+  assert.equal(output.error.code, 'cancelled')
+  assert.equal(output.nextAction.type, 'retry_request')
+  assert.equal(posts, 0)
+}))
+
+/** 最小合法 mp4 容器头:detectReferenceMedia 只看 bytes[4..8] === 'ftyp'。 */
+const tinyMp4 = () => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.from([0, 0, 0, 0]), Buffer.from('isom'), Buffer.alloc(8)])
+
+test('presign timeout and invalid JSON before submission retry with the same requestId, never check_generation', () => isolated(async directory => {
+  const clip = join(directory, 'clip.mp4'); await writeFile(clip, tinyMp4())
+  const input = () => ({ prompt: 'x', modelId: 'seedance-2-5', referenceVideos: [clip], requestId: randomUUID(), wait: false })
+  let generatePosts = 0
+  const isGenerate = url => String(url).includes('/api/generate/v2') && !String(url).includes('/requests/')
+  // 显式 requestId 会先查一次服务端回执:这里按「从未提交」回 404,让流程进入上传阶段
+  const notFound = () => Response.json({ success: false, code: 'request_not_found' }, { status: 404 })
+  // 1) 真实超时:presign 的 fetch 永不返回,由 withHttpResponse 自己的 20s 计时器中止(用 mock timers 拨快)
+  let presignSeen; const presignStarted = new Promise(resolve => { presignSeen = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    globalThis.fetch = (url, init) => {
+      if (String(url).includes('/requests/')) return Promise.resolve(notFound())
+      if (isGenerate(url)) { generatePosts++; return Promise.resolve(Response.json({ success: true, generationId: 'never' })) }
+      presignSeen()
+      return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }))
+    }
+    const pending = runMeiGenGeneration('video', input(), client(), config)
+    await presignStarted
+    mock.timers.tick(30_000)
+    const timedOut = await pending
+    assert.equal(timedOut.success, false)
+    assert.equal(['pre_submit_failed', 'upload_failed'].includes(timedOut.error.code), true, timedOut.error.code)
+    assert.equal(timedOut.nextAction.type, 'retry_request')
+    assert.equal(timedOut.status, 'error')
+  } finally { mock.timers.reset() }
+  // 2) presign 回了非 JSON
+  globalThis.fetch = async url => {
+    if (String(url).includes('/requests/')) return notFound()
+    if (isGenerate(url)) { generatePosts++; return Response.json({ success: true, generationId: 'never' }) }
+    return new Response('<html>oops</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+  }
+  const badJson = await runMeiGenGeneration('video', input(), client(), config)
+  assert.equal(badJson.success, false)
+  assert.equal(['pre_submit_failed', 'upload_failed'].includes(badJson.error.code), true, badJson.error.code)
+  assert.equal(badJson.nextAction.type, 'retry_request')
+  assert.notEqual(badJson.nextAction.type, 'check_generation')
+  assert.equal(generatePosts, 0)
+}))
+
+test('media uploads hold at most two clips in memory at once, even across concurrent tasks', () => isolated(async directory => {
+  const { fingerprintMediaReferences, uploadMediaReferences } = referencesModule
+  const clips = []
+  for (let i = 0; i < 3; i++) { const path = join(directory, `clip-${i}.mp4`); await writeFile(path, Buffer.concat([tinyMp4(), Buffer.from([i])])); clips.push(path) }
+  let inFlight = 0; let peak = 0
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'PUT') {
+      inFlight++; peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      inFlight--
+      return new Response(null, { status: 200 })
+    }
+    return Response.json({ success: true, presignedUrl: 'https://upload.example/put', publicUrl: `https://images.meigen.ai/ref-videos/${randomUUID()}.mp4` })
+  }
+  const references = await fingerprintMediaReferences(clips, 'video')
+  // 两个并行任务、共 6 段:PUT 同时在途的从不超过 2
+  const [a, b] = await Promise.all([
+    uploadMediaReferences(references, 'seedance-2-5', config),
+    uploadMediaReferences(references, 'seedance-2-5', config),
+  ])
+  assert.equal(a.length, 3); assert.equal(b.length, 3)
+  assert.equal(peak <= 2, true, `peak in-flight PUTs was ${peak}`)
+  assert.equal(peak >= 1, true)
+}))
+
+/** 证明两个上传槽都在:两段并行上传的 PUT 在途峰值必须到 2,且在有限时间内完成(漏槽会卡住或只到 1)。 */
+async function assertMediaUploadSlotsFree(directory, config) {
+  const { fingerprintMediaReferences, uploadMediaReferences } = referencesModule
+  const clips = []
+  for (let i = 0; i < 2; i++) { const path = join(directory, `probe-${i}-${randomUUID()}.mp4`); await writeFile(path, Buffer.concat([tinyMp4(), Buffer.from([i])])); clips.push(path) }
+  let inFlight = 0; let peak = 0
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'PUT') {
+      inFlight++; peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      inFlight--
+      return new Response(null, { status: 200 })
+    }
+    return Response.json({ success: true, presignedUrl: 'https://upload.example/put', publicUrl: `https://images.meigen.ai/ref-videos/${randomUUID()}.mp4` })
+  }
+  const references = await fingerprintMediaReferences(clips, 'video')
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('media upload permits were not released')), 3000))
+  await Promise.race([Promise.all([uploadMediaReferences([references[0]], 'seedance-2-5', config), uploadMediaReferences([references[1]], 'seedance-2-5', config)]), timeout])
+  assert.equal(peak, 2, 'both upload permits must be available')
+}
+
+test('a PUT timeout before submission retries with the same requestId and releases its upload permit', () => isolated(async directory => {
+  const clip = join(directory, 'clip.mp4'); await writeFile(clip, tinyMp4())
+  let generatePosts = 0
+  let putSeen; const putStarted = new Promise(resolve => { putSeen = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+  let output
+  try {
+    globalThis.fetch = (url, init) => {
+      if (String(url).includes('/requests/')) return Promise.resolve(Response.json({ success: false, code: 'request_not_found' }, { status: 404 }))
+      if (String(url).includes('/api/generate/v2')) { generatePosts++; return Promise.resolve(Response.json({ success: true, generationId: 'never' })) }
+      if (init?.method === 'PUT') { putSeen(); return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true })) }
+      return Promise.resolve(Response.json({ success: true, presignedUrl: 'https://upload.example/put', publicUrl: 'https://images.meigen.ai/ref-videos/x.mp4' }))
+    }
+    const pending = runMeiGenGeneration('video', { prompt: 'x', modelId: 'seedance-2-5', referenceVideos: [clip], requestId: randomUUID(), wait: false }, client(), config)
+    await putStarted
+    // uploadReferenceMedia 给大文件 PUT 的是 300s 窗口:拨过它,走真实的 withHttpResponse 超时路径
+    mock.timers.tick(300_001)
+    output = await pending
+  } finally { mock.timers.reset() }
+  assert.equal(output.success, false)
+  assert.equal(['pre_submit_failed', 'upload_failed'].includes(output.error.code), true, output.error.code)
+  assert.equal(output.nextAction.type, 'retry_request')
+  assert.equal(generatePosts, 0)
+  await assertMediaUploadSlotsFree(directory, config)
+}))
+
+test('cancelling an upload that holds a permit, and a failed PUT, both hand the permit back', () => isolated(async directory => {
+  const { fingerprintMediaReferences, uploadMediaReferences } = referencesModule
+  const clip = join(directory, 'clip.mp4'); await writeFile(clip, tinyMp4())
+  const references = await fingerprintMediaReferences([clip], 'video')
+  // 1) 持槽期间被取消:PUT 挂起,调用方 abort
+  const controller = new AbortController()
+  let putSeen; const putStarted = new Promise(resolve => { putSeen = resolve })
+  globalThis.fetch = (url, init) => {
+    if (init?.method === 'PUT') { putSeen(); return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true })) }
+    return Promise.resolve(Response.json({ success: true, presignedUrl: 'https://upload.example/put', publicUrl: 'https://images.meigen.ai/ref-videos/x.mp4' }))
+  }
+  const cancelled = uploadMediaReferences(references, 'seedance-2-5', config, controller.signal)
+  await putStarted
+  controller.abort()
+  await assert.rejects(cancelled, error => error?.name === 'AbortError')
+  await assertMediaUploadSlotsFree(directory, config)
+  // 2) PUT 失败(存储侧 500)
+  globalThis.fetch = async (url, init) => init?.method === 'PUT'
+    ? new Response('storage error', { status: 500 })
+    : Response.json({ success: true, presignedUrl: 'https://upload.example/put', publicUrl: 'https://images.meigen.ai/ref-videos/x.mp4' })
+  await assert.rejects(uploadMediaReferences(references, 'seedance-2-5', config), error => error instanceof uploadModule.ImageUploadError && error.status === 500 && error.stage === 'put')
+  await assertMediaUploadSlotsFree(directory, config)
+}))

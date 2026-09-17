@@ -52,6 +52,10 @@ export function errorOutput(error: unknown, context: Partial<GenerationOutput> =
     ? context.provider === 'meigen'
       ? { type: 'top_up', message: 'Top up purchased credits on the same MeiGen account at https://www.meigen.ai/profile. Then resubmit the exact original inputs with the same requestId; polling cannot retry payment.' }
       : { type: 'configure_provider_billing', message: 'Check billing or quota with the selected provider. MeiGen credits do not pay for this provider. Verify any existing provider job before deliberately trying again; MeiGen requestId recovery does not apply.' }
+    : known && (error.code === 'upload_failed' || error.code === 'pre_submit_failed')
+    ? { type: 'retry_request', message: 'Reference preparation or upload failed before submission; nothing was submitted or charged. Retry the exact same inputs with this same requestId once the service recovers.' }
+    : known && error.code === 'cancelled' && !context.generationId
+    ? { type: 'retry_request', message: 'Cancelled before submission; nothing was submitted or charged. If still wanted, resend the same inputs with the same requestId.' }
     : known && (error.httpStatus === 401 || error.httpStatus === 403)
       ? { type: 'configure_auth', message: context.provider === 'meigen'
         ? 'Check or replace the MeiGen key in private MCP configuration, then recover with the same requestId. Never paste a secret into chat.'

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, readdir, stat, writeFile, chmod, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import sharp from 'sharp'
 import { z } from 'zod'
@@ -315,4 +315,67 @@ test('lost submit response retains original media intent in request-ID recovery 
  globalThis.fetch=async()=>Response.json({success:false,code:'in_progress',retryable:true,retryAfterSeconds:5},{status:409})
  const checked=valid((await tool(checkModule.registerCheckGeneration).run(output.nextAction.arguments)).structuredContent)
  assert.equal(checked.status,'processing');assert.deepEqual(checked.nextAction.arguments,{requestId,requestedMediaType:'image'});assert.equal(posts,1)
+}))
+
+const ISO_MEDIA = Buffer.concat([Buffer.from([0,0,0,0x20]),Buffer.from('ftyp'),Buffer.from('isom'),Buffer.alloc(24,7)])
+const WAVE_MEDIA = Buffer.concat([Buffer.from('RIFF'),Buffer.from([0x24,0,0,0]),Buffer.from('WAVE'),Buffer.from('fmt '),Buffer.alloc(16,1)])
+
+test('reference video and audio arrays upload local clips once and reach the API as arrays without the legacy scalar',()=>isolated(async directory=>{
+ const clip=join(directory,'clip.mp4'),audio=join(directory,'tone.wav')
+ await writeFile(clip,ISO_MEDIA);await writeFile(audio,WAVE_MEDIA)
+ const requestId=randomUUID();const bodies=[],presigns=[],puts=[]
+ globalThis.fetch=async(url,init)=>{
+  if(String(url).includes('/api/upload/reference-video')){presigns.push(JSON.parse(init.body));return Response.json({success:true,presignedUrl:`https://storage.example/put-${presigns.length}`,publicUrl:`https://images.meigen.ai/ref-videos/2026-09-17/${presigns.length}.bin`})}
+  if(init?.method==='PUT'){puts.push(Buffer.from(init.body));return new Response(null)}
+  if(String(url).includes('/requests/'))return bodies.length?Response.json({success:true,status:'processing',generationId:'video-job'}):Response.json({success:false,code:'request_not_found'},{status:404})
+  bodies.push(JSON.parse(init.body));return Response.json({success:true,generationId:'video-job'})
+ }
+ const video=tool(videoModule.registerGenerateVideo)
+ const args={prompt:'Extend this: keep the move of Video 1 and the rhythm of Audio 1',model:'seedance-2-5',referenceVideos:[clip],referenceAudios:[audio],requestId,wait:false,download:false}
+ assert.equal(valid((await video.run(args)).structuredContent).generationId,'video-job')
+ assert.deepEqual(presigns.map(entry=>entry.kind),['video','audio'])
+ assert.deepEqual(presigns.map(entry=>entry.modelId),['seedance-2-5','seedance-2-5'])
+ assert.deepEqual(presigns.map(entry=>entry.contentType),['video/mp4','audio/wav'])
+ assert.equal(Buffer.compare(puts[0],ISO_MEDIA),0)
+ assert.deepEqual(bodies[0].referenceVideos,['https://images.meigen.ai/ref-videos/2026-09-17/1.bin'])
+ assert.deepEqual(bodies[0].referenceAudios,['https://images.meigen.ai/ref-videos/2026-09-17/2.bin'])
+ assert.equal(Object.hasOwn(bodies[0],'referenceVideo'),false)
+ // Write-once receipts: the retry re-uses the published URLs instead of re-uploading or re-charging.
+ assert.equal((await video.run(args)).structuredContent.deduped,true)
+ assert.equal(presigns.length,2);assert.equal(bodies.length,1)
+ const store=join(process.env.MEIGEN_REQUEST_STORE_DIR,createHash('sha256').update(config.meigenBaseUrl).digest('hex'),requestId)
+ assert.deepEqual(JSON.parse(await readFile(join(store,'video-references.json'),'utf8')),{references:['https://images.meigen.ai/ref-videos/2026-09-17/1.bin']})
+ assert.deepEqual(JSON.parse(await readFile(join(store,'audio-references.json'),'utf8')),{references:['https://images.meigen.ai/ref-videos/2026-09-17/2.bin']})
+ assert.deepEqual(JSON.parse(await readFile(join(store,'references.json'),'utf8')),{references:[]})
+}))
+
+test('a deprecated referenceVideo that disagrees with referenceVideos is rejected before any dispatch',async()=>{
+ let calls=0;const previous=globalThis.fetch
+ globalThis.fetch=async()=>{calls++;throw new Error('must not dispatch a contradictory reference set')}
+ try{
+  const video=tool(videoModule.registerGenerateVideo)
+  const result=(await video.run({prompt:'clip',model:'seedance-2-5',referenceVideo:'https://images.meigen.ai/b.mp4',referenceVideos:['https://images.meigen.ai/a.mp4'],requestId:randomUUID(),wait:false})).structuredContent
+  assert.equal(result.error.code,'invalid_reference');assert.match(result.error.message,/first entry of referenceVideos/);assert.equal(calls,0)
+ }finally{globalThis.fetch=previous}
+})
+
+test('the legacy single-clip request keeps its exact body and its pre-existing saved fingerprint',()=>isolated(async()=>{
+ const requestId=randomUUID();const referenceVideo='https://images.meigen.ai/clip.mp4';const bodies=[]
+ globalThis.fetch=async(url,init)=>{
+  if(String(url).includes('/api/upload/reference-video'))throw new Error('a public URL must never be re-uploaded')
+  if(String(url).includes('/requests/'))return bodies.length?Response.json({success:true,status:'processing',generationId:'legacy-job'}):Response.json({success:false,code:'request_not_found'},{status:404})
+  bodies.push(JSON.parse(init.body));return Response.json({success:true,generationId:'legacy-job'})
+ }
+ const video=tool(videoModule.registerGenerateVideo)
+ const args={prompt:'extend it',model:'seedance-2-0',referenceVideo,requestId,wait:false,download:false}
+ assert.equal(valid((await video.run(args)).structuredContent).generationId,'legacy-job')
+ // Byte-identical legacy body: the scalar only, in its historical position, with no empty arrays.
+ assert.deepEqual(bodies[0],{modelId:'seedance-2-0',prompt:'extend it',aspectRatio:'auto',referenceVideo,idempotencyKey:requestId})
+ // An explicitly empty array is not a different request: it must not rewrite the saved identity.
+ assert.equal((await video.run({...args,referenceVideos:[],referenceAudios:[]})).structuredContent.deduped,true)
+ // Identity published by an older release, recomputed here with the pre-feature formula.
+ const historical=createHash('sha256').update(JSON.stringify({mediaType:'video',parameters:{modelId:'seedance-2-0',prompt:'extend it',referenceVideo},references:[]})).digest('hex')
+ const store=join(process.env.MEIGEN_REQUEST_STORE_DIR,createHash('sha256').update(config.meigenBaseUrl).digest('hex'),requestId)
+ assert.equal(JSON.parse(await readFile(join(store,'identity.json'),'utf8')).fingerprint,historical)
+ assert.equal(bodies.length,1)
 }))

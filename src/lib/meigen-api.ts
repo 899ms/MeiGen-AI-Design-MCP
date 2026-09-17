@@ -73,10 +73,25 @@ export interface MeiGenModel {
         enabled: boolean
         minSeconds: number
         maxSeconds: number
+        /** Additive (2026-09): clips per request. Absent on an older cached body ⇒ 1. */
+        maxCount?: number
+        /** Additive (2026-09): SUM of clip seconds per request. Absent ⇒ maxSeconds. */
+        maxTotalSeconds?: number
         tiers?: string[]
         resolutions?: string[]
         resolutionsByTier?: Record<string, string[]>
         maxUploadBytes?: number
+      }
+      /** Additive (2026-09) reference AUDIO. Absent ⇒ disabled; audio is never billed. */
+      referenceAudio?: {
+        enabled: boolean
+        minSeconds: number
+        maxSeconds: number
+        maxCount: number
+        maxTotalSeconds: number
+        maxUploadBytes: number
+        formats: string[]
+        requiresVisualReference: boolean
       }
       billing?: {
         mode: 'per_second' | 'per_call'
@@ -279,7 +294,9 @@ export class MeiGenApiClient {
     duration?: number
     tier?: string
     referenceImages?: string[]
-    referenceVideo?: string           // 仅 Seedance 2.0:参考视频 URL(续写场景)
+    referenceVideo?: string           // deprecated single-clip alias; still sent verbatim when it is the only clip
+    referenceVideos?: string[]        // Seedance 2.x 参考视频 URL 数组(images.meigen.ai)
+    referenceAudios?: string[]        // Seedance 2.x 参考音频 URL 数组(images.meigen.ai;不计费)
     referenceVideoDuration?: number   // deprecated compatibility input; never sent (server probes MP4)
     requestId?: string
     signal?: AbortSignal
@@ -298,6 +315,10 @@ export class MeiGenApiClient {
     if (params.tier) body.tier = params.tier
     if (params.referenceImages?.length) body.referenceImages = params.referenceImages
     if (params.referenceVideo) body.referenceVideo = params.referenceVideo
+    // Appended AFTER the legacy key so a legacy-shaped request serializes byte-identically
+    // and keeps hitting the same server-side idempotency record.
+    if (params.referenceVideos?.length) body.referenceVideos = params.referenceVideos
+    if (params.referenceAudios?.length) body.referenceAudios = params.referenceAudios
     // Never send client-reported clip duration: it must not affect request identity or billing.
 
     return await this.submitWithAttemptKey(body, params.requestId, params.signal)

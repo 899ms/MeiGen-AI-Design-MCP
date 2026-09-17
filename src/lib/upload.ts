@@ -79,8 +79,9 @@ interface PresignResponse {
 }
 
 /** Upload infrastructure errors retain their status for Skills recovery guidance. */
+/** `stage` 区分 presign(鉴权/额度/校验)与 PUT(对象存储):PUT 403 是签名 URL 过期/存储侧拒绝,不是 API Key 无效。 */
 export class ImageUploadError extends Error {
-  constructor(message: string, public status: number) { super(message) }
+  constructor(message: string, public status: number, public stage: 'presign' | 'put' = 'presign') { super(message) }
 }
 
 
@@ -173,7 +174,7 @@ async function uploadToR2(
     return data as unknown as PresignResponse
   }, signal)
   await withHttpResponse(presignData.presignedUrl, { method: 'PUT', headers: { 'Content-Type': mimeType }, body: buffer }, 30_000, async response => {
-    if (!response.ok) throw new ImageUploadError(`Upload failed: ${response.status}`, response.status)
+    if (!response.ok) throw new ImageUploadError(`Upload failed: ${response.status}`, response.status, 'put')
     await response.body?.cancel()
   }, signal)
 
@@ -350,4 +351,48 @@ export async function processAndUploadReferenceBuffer(input: Buffer, filename: s
   const converted = await prepareSkillImage(input, mime, false, signal)
   abortReason(signal)
   return uploadToR2(converted.buffer, filename, converted.mimeType, config, signal)
+}
+
+/**
+ * Upload a reference VIDEO or AUDIO clip through the site's presign route.
+ *
+ * Deliberately not the image gateway: the reference-media route is authenticated (Supabase
+ * session OR meigen_sk_ API token), enforces the selected model's own per-file cap, and stores
+ * under the 7-day ref-videos/ R2 lifecycle. The bytes are uploaded verbatim — no decode, no
+ * re-encode, no dimension change — because the backend probes this exact file for the duration
+ * that drives billing.
+ */
+export async function uploadReferenceMedia(
+  input: Buffer,
+  filename: string,
+  contentType: string,
+  kind: 'video' | 'audio',
+  modelId: string | undefined,
+  config: MeiGenConfig,
+  signal?: AbortSignal,
+): Promise<string> {
+  abortReason(signal)
+  if (!config.meigenApiToken) {
+    throw new ImageUploadError('MEIGEN_API_TOKEN is required to upload a local reference video or audio file. Create a key at https://www.meigen.ai/profile/api-keys, or pass an https://images.meigen.ai/... URL from an earlier MeiGen generation instead.', 401)
+  }
+  const base = config.meigenBaseUrl.replace(/\/$/, '')
+  const presign = await withHttpResponse(`${base}/api/upload/reference-video`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${config.meigenApiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, contentType, size: input.byteLength, ...(modelId ? { modelId } : {}), kind }),
+  }, 20_000, async response => {
+    const data = await boundedJson(response)
+    if (!response.ok) throw new ImageUploadError(typeof data.error === 'string' ? data.error : `Reference ${kind} presign failed: ${response.status}`, response.status)
+    if (!data.success || typeof data.presignedUrl !== 'string' || typeof data.publicUrl !== 'string') {
+      throw new ImageUploadError(`The reference ${kind} upload service returned an incomplete response. Retry the upload shortly.`, 503)
+    }
+    return data as unknown as PresignResponse
+  }, signal)
+  abortReason(signal)
+  // Large clips need a much longer window than a compressed reference image.
+  await withHttpResponse(presign.presignedUrl, { method: 'PUT', headers: { 'Content-Type': contentType }, body: input }, 300_000, async response => {
+    if (!response.ok) throw new ImageUploadError(`Reference ${kind} upload failed: ${response.status}`, response.status, 'put')
+    await response.body?.cancel()
+  }, signal)
+  return presign.publicUrl
 }

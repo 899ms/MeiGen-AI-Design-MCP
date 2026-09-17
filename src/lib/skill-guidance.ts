@@ -4,7 +4,7 @@ export const SKILL_ACCOUNT_GUIDE = {
   topUpUrl: 'https://www.meigen.ai/profile',
   mobileTopUpUrl: 'https://www.meigen.ai/m/premium',
   pricingUrl: 'https://www.meigen.ai/model-comparison',
-  connection: { remoteUrl: 'https://www.meigen.ai/api/mcp', remoteHeader: 'Authorization: Bearer <MeiGen API key>', localCommand: 'npx', localArgs: ['-y', 'meigen@2.0.0'], localTokenEnv: 'MEIGEN_API_TOKEN', setupUrl: 'https://github.com/jau123/MeiGen-AI-Design-MCP#quick-start' },
+  connection: { remoteUrl: 'https://www.meigen.ai/api/mcp', remoteHeader: 'Authorization: Bearer <MeiGen API key>', localCommand: 'npx', localArgs: ['-y', 'meigen@2.0.1'], localTokenEnv: 'MEIGEN_API_TOKEN', setupUrl: 'https://www.meigen.ai/mcp' },
   authentication: 'Sign in to MeiGen in a desktop browser and create an API key on the API Keys page (mobile does not expose key creation). Local npm: set MEIGEN_API_TOKEN in the MCP server environment. Remote HTTP: set Authorization: Bearer <key> in the host connection headers/credentials. Reconnect after updating credentials. Never request the secret in chat or put it in a URL. An npm publishing token is not a MeiGen API key.',
   credits: 'Use the same MeiGen account that owns the API key. On Profile choose Top Up; on mobile use the premium page. Purchase credits there, then return to the MCP conversation. API calls use purchased credits only, including the first background removal; daily free credits and Web free attempts are unavailable through the API. The model pricing page lists costs; it is not the checkout page.',
 } as const

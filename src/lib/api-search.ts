@@ -32,20 +32,31 @@ interface ApiSearchResponse {
  * falling back to the bundled snapshot — the server added per-IP anti-scrape limits
  * (429), and masking them behind stale local data misleads users.
  * - ok: server results
- * - rate-limited: tell the user to retry shortly; do NOT silently degrade
+ * - rate-limited: per-IP window (a minute) — tell the user to retry shortly; do NOT silently degrade
+ * - daily-limit: the account's daily allowance is gone until 00:00 UTC — say so, then the bundled
+ *   library is the only useful answer for the rest of the day
  * - unavailable: network failure / server error → caller may fall back to local
  */
 export type ApiSearchOutcome =
   | { kind: 'ok'; results: ApiSearchResult[] }
   | { kind: 'rate-limited' }
+  /** 账户每日搜索额度用尽(带 key 才会出现):UTC 次日 00:00 才重置,不是一分钟后能好的事。 */
+  | { kind: 'daily-limit' }
   | { kind: 'unavailable' }
 
-/** Search posts via website API (semantic vector + keyword hybrid search). */
+/**
+ * Search posts via website API (semantic vector + keyword hybrid search).
+ *
+ * `apiToken` is optional: anonymous callers share the per-IP anti-scrape budget, while a
+ * MeiGen API key makes the request countable against that account's own daily search quota
+ * instead — which is what lets a single machine keep searching behind a shared NAT.
+ */
 export async function apiSearchPosts(
   baseUrl: string,
   query: string,
   limit: number,
   offset: number,
+  apiToken?: string,
 ): Promise<ApiSearchOutcome> {
   try {
     const params = new URLSearchParams({
@@ -60,10 +71,17 @@ export async function apiSearchPosts(
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 8000)
 
-    const res = await fetch(url, { signal: controller.signal })
+    const res = await fetch(url, {
+      signal: controller.signal,
+      ...(apiToken ? { headers: { Authorization: `Bearer ${apiToken}` } } : {}),
+    })
     clearTimeout(timeout)
 
-    if (res.status === 429) return { kind: 'rate-limited' }
+    if (res.status === 429) {
+      // 两种 429 的处置完全不同:账户每日额度(code=DAILY_LIMIT_REACHED)vs 匿名 IP 限流。
+      const code = await res.json().then(body => (body && typeof body === 'object' && 'code' in body ? String(body.code) : ''), () => '')
+      return { kind: code === 'DAILY_LIMIT_REACHED' ? 'daily-limit' : 'rate-limited' }
+    }
     if (!res.ok) return { kind: 'unavailable' }
 
     const json = await res.json() as ApiSearchResponse

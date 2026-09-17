@@ -19,7 +19,7 @@ Merge this server into your mcporter configuration (`~/.config/mcporter/config.j
   "mcpServers": {
     "creative-toolkit": {
       "command": "npx",
-      "args": ["-y", "meigen@2.0.0"]
+      "args": ["-y", "meigen@2.0.1"]
     }
   }
 }
@@ -55,7 +55,7 @@ The current local npm release exposes **17 tools**: **14 cloud tools** plus **3 
 
 | Scope | Tools | Behavior |
 |---|---|---|
-| Cloud, public discovery | `search_gallery`, `get_inspiration`, `list_models`, `list_skills` | No API key needed; no generation charge |
+| Cloud, public discovery | `search_gallery`, `get_inspiration`, `list_models`, `list_skills` | No API key needed; no generation charge. A configured key makes `search_gallery` count against that account's daily search quota rather than the shared per-IP budget |
 | Cloud, ordinary generation | `generate_image`, `generate_video`, `check_generation` | MeiGen generation needs purchased credits; status checks do not start a new job |
 | Cloud, five workflows | `remove_background`, `generate_product_detail_images`, `generate_marketing_poster`, `generate_ai_background`, `upscale_image` | MeiGen key and purchased credits only |
 | Cloud, workflow status | `check_skill` | Authenticated status/refunds; no new charge |
@@ -64,7 +64,7 @@ The current local npm release exposes **17 tools**: **14 cloud tools** plus **3 
 
 ## Ordinary generation and optional creative help
 
-Call `generate_image` with the supplied prompt and parameters. `generate_video` requires a model; use `list_models` for current capabilities and prices whenever needed, not only when a user asks to browse. For image-to-video, chain a completed frame URL into `firstFrame`. Preserve the caller's selected model/provider and ratio.
+Call `generate_image` with the supplied prompt and parameters. `generate_video` requires a model; use `list_models` for current capabilities and prices whenever needed, not only when a user asks to browse. For image-to-video, chain a completed frame URL into `firstFrame`. Reference clips go in `referenceVideos` / `referenceAudios` (`images.meigen.ai` URLs, or local `.mp4`/`.mov`/`.wav`/`.mp3` files which are uploaded for you — other hosts are rejected) and can be named in the prompt as "Video 1" / "Audio 1"; `list_models` holds each model's clip count and second budget, some models need a reference image or video before any audio, and reference audio is never billed. Preserve the caller's selected model/provider and ratio.
 
 For composed MeiGen jobs, persist a UUID `requestId` and exact input per step, then use `wait: false`, `download: false`. Local legacy defaults remain `wait: true`, `download: true`; no download occurs with `wait: false`. Remote MCP returns URLs without local downloads. Follow the installed schema for provider/transport support. Recover across restarts using `check_generation` with the original `requestId` or `generationId`; keep IDs and inputs unchanged on transient failure and follow `nextAction`, polling hints and `Retry-After`.
 

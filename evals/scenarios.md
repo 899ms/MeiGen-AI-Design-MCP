@@ -1,6 +1,6 @@
 # Eval scenarios
 
-Manual host-level checks complement `pnpm test`; run with the locally built 2.0.0 package and a controlled backend before public release. Use current tool schemas, server instructions and [the workflow contract](../COMPOSABLE_WORKFLOWS.md). Real paid-provider checks require an explicitly approved scope and budget.
+Manual host-level checks complement `pnpm test`; run with the locally built 2.0.1 package and a controlled backend before public release. Use current tool schemas, server instructions and [the workflow contract](../COMPOSABLE_WORKFLOWS.md). Real paid-provider checks require an explicitly approved scope and budget.
 
 | ID | Input or condition | Expected behavior | Failure to catch |
 | --- | --- | --- | --- |

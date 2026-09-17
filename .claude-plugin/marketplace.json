@@ -9,7 +9,7 @@
       "name": "meigen",
       "source": "./plugin",
       "description": "MeiGen MCP: AI-powered visual creative expert — search inspiration, enhance prompts, and generate images",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": {
         "name": "MeiGen"
       },
